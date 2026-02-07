@@ -1,0 +1,10 @@
+.DS_Store
+/.build
+/.swiftpm
+/Packages
+/*.xcodeproj
+xcuserdata/
+
+# Explicitly allow the Showcase project
+!/Example/ImageStreamerApp.swiftpm
+/Example/ImageStreamerApp.swiftpm/**/*.swiftpm
