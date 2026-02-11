@@ -348,6 +348,78 @@ struct ImageStreamerCoalescingTests {
         let totalRequests = await requestTracker.requestCount(for: url)
         #expect(totalRequests == 1, "Should coalesce requests even when they fail")
     }
+
+    @Test("Multiple secondary waiters all receive the same result")
+    func multipleSecondaryWaitersReceiveSameResult() async throws {
+        let url = URL(string: "https://example.com/shared.png")!
+        let imageData = MockImageData.validPNGData()
+        let response = MockImageData.successResponse(for: url)
+
+        let instrumentation = StandardImageStreamerInstrumentation()
+        let requestTracker = RequestTracker()
+        let (streamer, _) = makeStreamer(
+            result: .success((imageData, response)),
+            delay: .milliseconds(200),
+            requestTracker: requestTracker,
+            instrumentation: instrumentation
+        )
+
+        // Start 5 concurrent requests - 1 primary + 4 secondary waiters
+        let tasks = (0..<5).map { _ in
+            Task { try await streamer.image(for: url) }
+        }
+
+        // All should complete successfully
+        var results: [PlatformImage?] = []
+        for task in tasks {
+            let image = try await task.value
+            results.append(image)
+        }
+
+        // All should have returned non-nil images
+        for (index, result) in results.enumerated() {
+            #expect(result != nil, "Task \(index) should have received an image")
+        }
+
+        // Only one network request
+        let totalRequests = await requestTracker.requestCount(for: url)
+        #expect(totalRequests == 1)
+
+        // Should have 1 network request + 4 coalesced requests
+        try await waitForStats(instrumentation) { stats in
+            stats.networkRequests == 1 && stats.coalescedRequests == 4
+        }
+    }
+
+    @Test("Subsequent request after coalesced batch completes triggers new network request")
+    func subsequentRequestAfterCoalescedBatchTriggersNewRequest() async throws {
+        let url = URL(string: "https://example.com/sequential.png")!
+        let imageData = MockImageData.validPNGData()
+        let response = MockImageData.successResponse(for: url)
+
+        let requestTracker = RequestTracker()
+        let instrumentation = StandardImageStreamerInstrumentation()
+        let (streamer, cache) = makeStreamer(
+            result: .success((imageData, response)),
+            delay: .milliseconds(100),
+            requestTracker: requestTracker,
+            instrumentation: instrumentation
+        )
+
+        // First batch of coalesced requests
+        async let image1 = streamer.image(for: url)
+        async let image2 = streamer.image(for: url)
+        _ = try await (image1, image2)
+
+        // Clear the cache to force a new network request
+        cache.removeAllObjects()
+
+        // New request after batch completes should trigger a new network request
+        _ = try await streamer.image(for: url)
+
+        let totalRequests = await requestTracker.requestCount(for: url)
+        #expect(totalRequests == 2, "Should make a new network request after cache is cleared")
+    }
 }
 
 // MARK: - Cancellation Tests
@@ -562,6 +634,162 @@ struct ImageStreamerCancellationTests {
         // No cancelled tasks should be recorded since task2 kept the request alive
         let stats = await instrumentation.currentStats
         #expect(stats.cancelledTasks == 0, "Task should not be counted as cancelled when other callers remain")
+    }
+
+    @Test("Cancelling multiple secondary waiters while primary continues")
+    func cancellingMultipleSecondaryWaitersWhilePrimaryContinues() async throws {
+        let url = URL(string: "https://example.com/multi-cancel.png")!
+        let imageData = MockImageData.validPNGData()
+        let response = MockImageData.successResponse(for: url)
+
+        let instrumentation = StandardImageStreamerInstrumentation()
+        let (streamer, _) = makeStreamer(
+            result: .success((imageData, response)),
+            delay: .milliseconds(300),
+            instrumentation: instrumentation
+        )
+
+        // Start 4 concurrent requests - task1 will be primary, others are secondary
+        let task1 = Task { try await streamer.image(for: url) }
+        
+        // Small delay to ensure task1 becomes the primary
+        try await Task.sleep(for: .milliseconds(20))
+        
+        let task2 = Task { try await streamer.image(for: url) }
+        let task3 = Task { try await streamer.image(for: url) }
+        let task4 = Task { try await streamer.image(for: url) }
+
+        // Give all tasks time to coalesce
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Cancel the secondary waiters, but not the primary
+        task2.cancel()
+        task3.cancel()
+        task4.cancel()
+
+        // Wait for cancellations to propagate
+        _ = try? await task2.value
+        _ = try? await task3.value
+        _ = try? await task4.value
+
+        // Primary should still complete successfully
+        let image1 = try await task1.value
+        #expect(image1 != nil, "Primary task should complete successfully")
+
+        // No cancelled tasks should be recorded since task1 kept the request alive
+        let stats = await instrumentation.currentStats
+        #expect(stats.cancelledTasks == 0, "No cancellation should be tracked when primary task completes")
+    }
+
+    @Test("Cancelling primary task while secondary waiters remain")
+    func cancellingPrimaryTaskWhileSecondaryWaitersRemain() async throws {
+        let url = URL(string: "https://example.com/primary-cancel.png")!
+        let imageData = MockImageData.validPNGData()
+        let response = MockImageData.successResponse(for: url)
+
+        let instrumentation = StandardImageStreamerInstrumentation()
+        let (streamer, _) = makeStreamer(
+            result: .success((imageData, response)),
+            delay: .milliseconds(300),
+            instrumentation: instrumentation
+        )
+
+        // Start primary task
+        let primaryTask = Task { try await streamer.image(for: url) }
+        
+        // Small delay to ensure primaryTask becomes the primary
+        try await Task.sleep(for: .milliseconds(20))
+        
+        // Start secondary waiters
+        let secondaryTask1 = Task { try await streamer.image(for: url) }
+        let secondaryTask2 = Task { try await streamer.image(for: url) }
+
+        // Give all tasks time to coalesce
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Cancel the primary task
+        primaryTask.cancel()
+
+        // Secondary tasks should still complete successfully
+        let image1 = try await secondaryTask1.value
+        let image2 = try await secondaryTask2.value
+        
+        #expect(image1 != nil, "Secondary task 1 should complete successfully")
+        #expect(image2 != nil, "Secondary task 2 should complete successfully")
+
+        // No cancellation should be tracked since secondary tasks kept request alive
+        let stats = await instrumentation.currentStats
+        #expect(stats.cancelledTasks == 0, "No cancellation should be tracked when secondary tasks remain")
+    }
+
+    @Test("Cancellation is tracked only when all waiters are cancelled")
+    func cancellationTrackedOnlyWhenAllWaitersCancelled() async throws {
+        let url = URL(string: "https://example.com/all-cancel.png")!
+        let imageData = MockImageData.validPNGData()
+        let response = MockImageData.successResponse(for: url)
+
+        let instrumentation = StandardImageStreamerInstrumentation()
+        let (streamer, _) = makeStreamer(
+            result: .success((imageData, response)),
+            delay: .seconds(10), // Long delay to ensure we can cancel all
+            instrumentation: instrumentation
+        )
+
+        // Start multiple concurrent requests
+        let tasks = (0..<5).map { _ in
+            Task { try await streamer.image(for: url) }
+        }
+
+        // Give all tasks time to coalesce
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Cancel all tasks
+        for task in tasks {
+            task.cancel()
+        }
+
+        // Wait for all cancellations to propagate
+        for task in tasks {
+            _ = try? await task.value
+        }
+
+        // Should have exactly 1 cancelled task tracked (the underlying network request)
+        try await waitForStats(instrumentation) { stats in
+            stats.cancelledTasks == 1
+        }
+    }
+
+    @Test("Late joiner after some cancellations still receives result")
+    func lateJoinerAfterSomeCancellationsStillReceivesResult() async throws {
+        let url = URL(string: "https://example.com/late-join.png")!
+        let imageData = MockImageData.validPNGData()
+        let response = MockImageData.successResponse(for: url)
+
+        let (streamer, _) = makeStreamer(
+            result: .success((imageData, response)),
+            delay: .milliseconds(300)
+        )
+
+        // Start initial tasks
+        let task1 = Task { try await streamer.image(for: url) }
+        let task2 = Task { try await streamer.image(for: url) }
+
+        // Give tasks time to coalesce
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Cancel one task
+        task1.cancel()
+        _ = try? await task1.value
+
+        // Start a late joiner while task2 is still waiting
+        let lateJoiner = Task { try await streamer.image(for: url) }
+
+        // Both remaining tasks should complete successfully
+        let image2 = try await task2.value
+        let imageLate = try await lateJoiner.value
+
+        #expect(image2 != nil, "Task2 should complete successfully")
+        #expect(imageLate != nil, "Late joiner should complete successfully")
     }
 }
 
@@ -1108,5 +1336,5 @@ private func waitForStats(
         try await Task.sleep(for: .milliseconds(50))
     }
     let finalStats = await instrumentation.currentStats
-    #expect(condition(finalStats), "Timeout waiting for stats condition. Final stats: cacheHits=\(finalStats.cacheHits), networkRequests=\(finalStats.networkRequests), coalescedRequests=\(finalStats.coalescedRequests)")
+    #expect(condition(finalStats), "Timeout waiting for stats condition. Final stats: cacheHits=\(finalStats.cacheHits), networkRequests=\(finalStats.networkRequests), coalescedRequests=\(finalStats.coalescedRequests), cancelledTasks=\(finalStats.cancelledTasks)")
 }

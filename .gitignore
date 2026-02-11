@@ -4,6 +4,7 @@
 /Packages
 /*.xcodeproj
 xcuserdata/
+/*.code-workspace
 
 # Explicitly allow the Showcase project
 !/Example/ImageStreamerApp.swiftpm
