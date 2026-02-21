@@ -12,18 +12,18 @@
 
 ## Features
 
--   **Native Async/Await**: Clean, readable, and safe code.
 -   **Task Coalescing**: Merges duplicate requests for the same URL automatically.
 -   **Task Cancellation**: Cancel requests when they're no longer needed.
 -   **Background Decoding & Downsampling**: smooth scrolling and lesser memory usage.
--   **Smart Caching**: Multi-layer caching including size-aware cache keys.
+-   **Smart Caching**: `NSCache`, light, thread-safe, and gracefully prunes itself —It won't crash your app with an Out-of-Memory (OOM) error
+-   **Native Async/Await**: Clean, readable, and safe code.
 -   **SwiftUI Ready**: Seamless integration via `EnvironmentValues`.
 
 ## Documentation
 
-*   [**Usage Guide**](Documentation/USAGE.md): Setup, Basic Usage, ViewModels, and Error Handling.
+*   [**Usage Guide**](Documentation/USAGE.md): Setup and basic usage.
 *   [**Advanced Topics**](Documentation/ADVANCED.md): Architecture, Performance details, Instrumentation, and Testing.
-*   [**Showcase App Walkthrough**](Documentation/SHOWCASE.md): See how to build a production-quality grid with prefetching and cancellation.
+*   [**Showcase App Walkthrough**](Documentation/SHOWCASE.md): Packed as a Swift Playground app `.swiftpm`. A grid of images with infinite scrolling.
 
 ## Installation
 
