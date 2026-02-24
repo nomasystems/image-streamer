@@ -17,7 +17,8 @@ struct ImageStreamerCoreTests {
 
         let image = try await streamer.image(for: url)
 
-        #expect(image != nil)
+        // If we got here without throwing, the image was successfully loaded.
+        _ = image
     }
 
     @Test("Loads and downsamples image to specified point size")
@@ -30,7 +31,7 @@ struct ImageStreamerCoreTests {
 
         let image = try await streamer.image(for: url, pointSize: CGSize(width: 100, height: 100))
 
-        #expect(image != nil)
+        _ = image
     }
 
     @Test("Throws invalidImageData error for corrupt data")
@@ -90,15 +91,13 @@ struct ImageStreamerCachingTests {
         )
 
         // First request - should hit network
-        let image1 = try await streamer.image(for: url)
-        #expect(image1 != nil)
+        _ = try await streamer.image(for: url)
 
         let firstRequestCount = await requestTracker.requestCount(for: url)
         #expect(firstRequestCount == 1)
 
         // Second request - should return from cache
-        let image2 = try await streamer.image(for: url)
-        #expect(image2 != nil)
+        _ = try await streamer.image(for: url)
 
         let secondRequestCount = await requestTracker.requestCount(for: url)
         #expect(secondRequestCount == 1, "Should not make additional network request for cached image")
@@ -247,12 +246,8 @@ struct ImageStreamerCoalescingTests {
         async let image2 = streamer.image(for: url)
         async let image3 = streamer.image(for: url)
 
-        let results = try await [image1, image2, image3]
-
-        // All should return valid images
-        for result in results {
-            #expect(result != nil)
-        }
+        // All should complete without throwing
+        _ = try await (image1, image2, image3)
 
         // But only one network request should have been made
         let totalRequests = await requestTracker.requestCount(for: url)
@@ -369,16 +364,9 @@ struct ImageStreamerCoalescingTests {
             Task { try await streamer.image(for: url) }
         }
 
-        // All should complete successfully
-        var results: [PlatformImage?] = []
+        // All should complete successfully without throwing
         for task in tasks {
-            let image = try await task.value
-            results.append(image)
-        }
-
-        // All should have returned non-nil images
-        for (index, result) in results.enumerated() {
-            #expect(result != nil, "Task \(index) should have received an image")
+            _ = try await task.value
         }
 
         // Only one network request
@@ -561,8 +549,7 @@ struct ImageStreamerCancellationTests {
         task1.cancel()
 
         // The second task should still complete successfully
-        let image2 = try await task2.value
-        #expect(image2 != nil, "Non-cancelled task should complete successfully")
+        _ = try await task2.value
     }
 
     @Test("Tracks cancelled tasks correctly")
@@ -628,8 +615,7 @@ struct ImageStreamerCancellationTests {
         _ = try? await task1.value
 
         // The second task should still complete successfully
-        let image2 = try await task2.value
-        #expect(image2 != nil)
+        _ = try await task2.value
 
         // No cancelled tasks should be recorded since task2 kept the request alive
         let stats = await instrumentation.currentStats
@@ -673,8 +659,7 @@ struct ImageStreamerCancellationTests {
         _ = try? await task4.value
 
         // Primary should still complete successfully
-        let image1 = try await task1.value
-        #expect(image1 != nil, "Primary task should complete successfully")
+        _ = try await task1.value
 
         // No cancelled tasks should be recorded since task1 kept the request alive
         let stats = await instrumentation.currentStats
@@ -711,11 +696,8 @@ struct ImageStreamerCancellationTests {
         primaryTask.cancel()
 
         // Secondary tasks should still complete successfully
-        let image1 = try await secondaryTask1.value
-        let image2 = try await secondaryTask2.value
-        
-        #expect(image1 != nil, "Secondary task 1 should complete successfully")
-        #expect(image2 != nil, "Secondary task 2 should complete successfully")
+        _ = try await secondaryTask1.value
+        _ = try await secondaryTask2.value
 
         // No cancellation should be tracked since secondary tasks kept request alive
         let stats = await instrumentation.currentStats
@@ -785,11 +767,8 @@ struct ImageStreamerCancellationTests {
         let lateJoiner = Task { try await streamer.image(for: url) }
 
         // Both remaining tasks should complete successfully
-        let image2 = try await task2.value
-        let imageLate = try await lateJoiner.value
-
-        #expect(image2 != nil, "Task2 should complete successfully")
-        #expect(imageLate != nil, "Late joiner should complete successfully")
+        _ = try await task2.value
+        _ = try await lateJoiner.value
     }
 }
 
@@ -807,9 +786,7 @@ struct ImageStreamerConvenienceTests {
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        let image = try await streamer.image(for: urlString)
-
-        #expect(image != nil)
+        _ = try await streamer.image(for: urlString)
     }
 
     @Test("Throws invalidURL error for malformed URL string")
@@ -843,9 +820,7 @@ struct ImageStreamerConvenienceTests {
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        let image = try await streamer.image(for: urlString)
-
-        #expect(image != nil)
+        _ = try await streamer.image(for: urlString)
     }
 }
 
@@ -862,9 +837,8 @@ struct ImageStreamerHTTPStatusTests {
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        let image = try await streamer.image(for: url)
-
-        #expect(image != nil, "Status code \(statusCode) should be accepted")
+        // Should not throw for 2xx status codes
+        _ = try await streamer.image(for: url)
     }
 
     @Test("Rejects 4xx client error status codes", arguments: [400, 401, 403, 404, 405, 408, 429])
@@ -1086,9 +1060,7 @@ struct ImageStreamerEdgeCaseTests {
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        let image = try await streamer.image(for: url)
-
-        #expect(image != nil)
+        _ = try await streamer.image(for: url)
     }
 
     @Test("Handles URL with query parameters")
@@ -1099,9 +1071,7 @@ struct ImageStreamerEdgeCaseTests {
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        let image = try await streamer.image(for: url)
-
-        #expect(image != nil)
+        _ = try await streamer.image(for: url)
     }
 
     @Test("Handles very small point size")
@@ -1112,9 +1082,7 @@ struct ImageStreamerEdgeCaseTests {
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        let image = try await streamer.image(for: url, pointSize: CGSize(width: 1, height: 1))
-
-        #expect(image != nil)
+        _ = try await streamer.image(for: url, pointSize: CGSize(width: 1, height: 1))
     }
 
     @Test("Handles large point size gracefully")
@@ -1126,9 +1094,7 @@ struct ImageStreamerEdgeCaseTests {
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
         // Request a size larger than the actual image
-        let image = try await streamer.image(for: url, pointSize: CGSize(width: 10000, height: 10000))
-
-        #expect(image != nil)
+        _ = try await streamer.image(for: url, pointSize: CGSize(width: 10000, height: 10000))
     }
 
     @Test("Handles non-square point size")
@@ -1139,9 +1105,7 @@ struct ImageStreamerEdgeCaseTests {
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        let image = try await streamer.image(for: url, pointSize: CGSize(width: 200, height: 50))
-
-        #expect(image != nil)
+        _ = try await streamer.image(for: url, pointSize: CGSize(width: 200, height: 50))
     }
 
     @Test("Same URL with different query parameters are cached separately")
@@ -1193,8 +1157,7 @@ struct ImageStreamerEdgeCaseTests {
 
         // Make many sequential requests
         for _ in 0..<10 {
-            let image = try await streamer.image(for: url)
-            #expect(image != nil)
+            _ = try await streamer.image(for: url)
         }
 
         // Only the first request should hit the network
@@ -1212,9 +1175,7 @@ struct ImageStreamerEdgeCaseTests {
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
         // Should still work since non-HTTP responses pass the status check
-        let image = try await streamer.image(for: url)
-
-        #expect(image != nil)
+        _ = try await streamer.image(for: url)
     }
 }
 

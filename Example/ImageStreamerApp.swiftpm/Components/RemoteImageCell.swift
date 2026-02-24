@@ -76,16 +76,12 @@ struct RemoteImageCell: View {
                 for: url,
                 pointSize: CGSize(width: 150, height: 150)
             )
-            
+            image = loadedImage
+
             // Check for cancellation before updating state
             try Task.checkCancellation()
-            
-            if let loadedImage {
-                image = loadedImage
-                loadState = .loaded
-            } else {
-                loadState = .failed
-            }
+
+            loadState = .loaded
         } catch is CancellationError {
             // Task was cancelled (view scrolled away)
             loadState = .idle

@@ -18,19 +18,9 @@ struct ShowcaseApp: App {
     
     var body: some Scene {
         WindowGroup {
-            TabView {
-                ContentView()
-                    .tabItem {
-                        Label("Grid", systemImage: "square.grid.3x3")
-                    }
-                
-                CoalescingDemoView()
-                    .tabItem {
-                        Label("Coalescing", systemImage: "arrow.triangle.merge")
-                    }
-            }
-            .environment(\.imageStreamer, imageStreamer)
-            .environment(\.instrumentation, instrumentation)
+            ContentView()
+                .environment(\.imageStreamer, imageStreamer)
+                .environment(\.instrumentation, instrumentation)
         }
     }
 }

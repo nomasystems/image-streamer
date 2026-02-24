@@ -104,9 +104,12 @@ struct MockImageLoader: ImageStreamerProtocol {
     var imageToReturn: PlatformImage?
     var errorToThrow: Error?
     
-    func image(for url: URL, pointSize: CGSize?) async throws -> PlatformImage? {
+    func image(for url: URL, pointSize: CGSize?) async throws -> PlatformImage {
         if let error = errorToThrow {
             throw error
+        }
+        guard let imageToReturn else {
+            throw ImageStreamerError.invalidImageData
         }
         return imageToReturn
     }

@@ -40,19 +40,19 @@ public protocol ImageStreamerProtocol: Sendable {
     ///   - url: The URL of the image to fetch.
     ///   - pointSize: The desired size in points. If provided, the image is downsampled to this size to save memory.
     /// - Returns: The PlatformImage if successful. Throws errors on network or decoding failure.
-    func image(for url: URL, pointSize: CGSize?) async throws -> PlatformImage?
+    func image(for url: URL, pointSize: CGSize?) async throws -> PlatformImage
 }
 
 // Default implementation for convenience
 public extension ImageStreamerProtocol {
-    func image(for url: URL) async throws -> PlatformImage? {
+    func image(for url: URL) async throws -> PlatformImage {
         try await image(for: url, pointSize: nil)
     }
 }
 
 /// Tracks an active task along with how many callers are waiting on it.
 private struct CoalescedTask {
-    let task: Task<PlatformImage?, Error>
+    let task: Task<PlatformImage, Error>
     var waiterCount: Int
 }
 
@@ -88,7 +88,7 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
 
     // MARK: - ImageLoaderProtocol API
 
-    public nonisolated func image(for url: URL, pointSize: CGSize?) async throws -> PlatformImage? {
+    public nonisolated func image(for url: URL, pointSize: CGSize?) async throws -> PlatformImage {
         let key = ImageCacheKey(url: url, pointSize: pointSize)
 
         // Fast path: Check cache without entering actor serialization
@@ -105,7 +105,7 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
 
     // MARK: - Private Helpers
 
-    private func fetchAndCoalesce(url: URL, pointSize: CGSize?, key: ImageCacheKey) async throws -> PlatformImage? {
+    private func fetchAndCoalesce(url: URL, pointSize: CGSize?, key: ImageCacheKey) async throws -> PlatformImage {
 
         // Double-check cache in case another task populated it while we were waiting to enter the actor
         if let cachedImage = self.cache.object(forKey: key) {
@@ -142,8 +142,8 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
         // No existing task - create the primary task
         await instrumentation?.notifyNetworkRequest()
 
-        let task = Task { [weak self] () -> PlatformImage? in
-            guard let self else { return nil }
+        let task = Task { [weak self] () -> PlatformImage in
+            guard let self else { throw CancellationError() }
             return try await self.fetchRemoteImage(url: url, pointSize: pointSize)
         }
 
@@ -204,7 +204,7 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
         }
     }
 
-    private func fetchRemoteImage(url: URL, pointSize: CGSize?) async throws -> PlatformImage? {
+    private func fetchRemoteImage(url: URL, pointSize: CGSize?) async throws -> PlatformImage {
 
         try Task.checkCancellation()
 
@@ -285,7 +285,7 @@ public extension ImageStreamer {
 
     /// Convenience method to load an image from a URL string.
     /// Useful when resource identifiers are passed as strings (e.g., from JSON responses).
-    func image(for urlString: String, pointSize: CGSize? = nil) async throws -> PlatformImage? {
+    func image(for urlString: String, pointSize: CGSize? = nil) async throws -> PlatformImage {
         guard let url = URL(string: urlString, encodingInvalidCharacters: false) else {
             let error = ImageStreamerError.invalidURL
             throw error
