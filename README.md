@@ -27,14 +27,37 @@
 
 ## Installation
 
-### Swift Package Manager
+Add `ImageStreamer` to the `dependencies` value of your `Package.swift`:
 
-Add `ImageStreamer` to your project via Swift Package Manager:
+```swift
+dependencies: [
+    .package(url: "https://github.com/nomasystems/image-streamer.git", from: "1.0.0")
+]
 
-1.  Open your project in Xcode.
-2.  Go to **File > Add Package Dependencies...**
-3.  Enter the repository URL: `https://github.com/nomasystems/ImageStreamer.git`
-4.  Select the version you want to use.
+```
+
+Then, add the package product to your target's dependencies:
+
+```swift
+targets: [
+    .target(
+        name: "YourApp",
+        dependencies: ["ImageStreamer"]
+    )
+]
+```
+
+---
+
+### Via Xcode
+
+1. Open your project in Xcode.
+2. Go to **File > Add Package Dependencies...**
+3. Enter the repository URL: `https://github.com/nomasystems/image-streamer.git`
+4. Set the **Dependency Rule** to **Up to Next Major Version** and enter `1.0.0`.
+5. Select the project target where you want to use the library.
+
+```
 
 ## License
 
