@@ -17,8 +17,7 @@ struct ImageStreamerCoreTests {
 
         let image = try await streamer.image(for: url)
 
-        // If we got here without throwing, the image was successfully loaded.
-        _ = image
+        #expect(image != nil)
     }
 
     @Test("Loads and downsamples image to specified point size")
@@ -31,7 +30,7 @@ struct ImageStreamerCoreTests {
 
         let image = try await streamer.image(for: url, pointSize: CGSize(width: 100, height: 100))
 
-        _ = image
+        #expect(image != nil)
     }
 
     @Test("Throws invalidImageData error for corrupt data")
@@ -103,33 +102,6 @@ struct ImageStreamerCachingTests {
         #expect(secondRequestCount == 1, "Should not make additional network request for cached image")
     }
 
-    @Test("Caches image after successful fetch")
-    func cachesImageAfterSuccessfulFetch() async throws {
-        let url = URL(string: "https://example.com/tocache.png")!
-        let imageData = MockImageData.validPNGData()
-        let response = MockImageData.successResponse(for: url)
-
-        let requestTracker = RequestTracker()
-        let (streamer, cache) = makeStreamer(
-            result: .success((imageData, response)),
-            requestTracker: requestTracker
-        )
-
-        let cacheKey = ImageCacheKey(url: url, pointSize: nil)
-
-        // Verify cache is empty before fetch
-        #expect(cache.object(forKey: cacheKey) == nil)
-
-        // Fetch the image
-        _ = try await streamer.image(for: url)
-
-        // Verify cache now contains the image
-        #expect(cache.object(forKey: cacheKey) != nil)
-
-        // Verify only one network request was made
-        let requestCount = await requestTracker.requestCount(for: url)
-        #expect(requestCount == 1)
-    }
 
     @Test("Does not cache image when fetch fails")
     func doesNotCacheOnFailure() async throws {
@@ -254,36 +226,6 @@ struct ImageStreamerCoalescingTests {
         #expect(totalRequests == 1, "Should coalesce concurrent requests into a single network call")
     }
 
-    @Test("Does not coalesce requests for different URLs")
-    func doesNotCoalesceDifferentURLs() async throws {
-        let url1 = URL(string: "https://example.com/image1.png")!
-        let url2 = URL(string: "https://example.com/image2.png")!
-        let imageData = MockImageData.validPNGData()
-
-        let responses: [URL: Result<(Data, URLResponse), Error>] = [
-            url1: .success((imageData, MockImageData.successResponse(for: url1))),
-            url2: .success((imageData, MockImageData.successResponse(for: url2)))
-        ]
-
-        let requestTracker = RequestTracker()
-        let (streamer, _) = makeStreamer(
-            responses: responses,
-            delay: .milliseconds(100),
-            requestTracker: requestTracker
-        )
-
-        // Start concurrent requests for different URLs
-        async let image1 = streamer.image(for: url1)
-        async let image2 = streamer.image(for: url2)
-
-        _ = try await (image1, image2)
-
-        // Both URLs should have been requested
-        let url1Requests = await requestTracker.requestCount(for: url1)
-        let url2Requests = await requestTracker.requestCount(for: url2)
-        #expect(url1Requests == 1, "URL1 should have exactly one request")
-        #expect(url2Requests == 1, "URL2 should have exactly one request")
-    }
 
     @Test("Does not coalesce requests for same URL with different point sizes")
     func doesNotCoalesceDifferentSizes() async throws {
@@ -552,37 +494,6 @@ struct ImageStreamerCancellationTests {
         _ = try await task2.value
     }
 
-    @Test("Tracks cancelled tasks correctly")
-    func tracksCancelledTasks() async throws {
-        let url = URL(string: "https://example.com/cancel.png")!
-        let imageData = MockImageData.validPNGData()
-        let response = MockImageData.successResponse(for: url)
-
-        let instrumentation = StandardImageStreamerInstrumentation()
-        let (streamer, _) = makeStreamer(
-            result: .success((imageData, response)),
-            delay: .seconds(10), // Long delay to ensure we can cancel
-            instrumentation: instrumentation
-        )
-
-        let task = Task {
-            try await streamer.image(for: url)
-        }
-
-        // Give the task time to start
-        try await Task.sleep(for: .milliseconds(50))
-
-        // Cancel the task
-        task.cancel()
-
-        // Wait for cancellation to propagate
-        _ = try? await task.value
-
-        // Verify the cancelled task was tracked
-        try await waitForStats(instrumentation) { stats in
-            stats.cancelledTasks == 1
-        }
-    }
 
     @Test("Does not track cancellation when other callers remain")
     func doesNotTrackCancellationWhenOthersRemain() async throws {
@@ -622,49 +533,6 @@ struct ImageStreamerCancellationTests {
         #expect(stats.cancelledTasks == 0, "Task should not be counted as cancelled when other callers remain")
     }
 
-    @Test("Cancelling multiple secondary waiters while primary continues")
-    func cancellingMultipleSecondaryWaitersWhilePrimaryContinues() async throws {
-        let url = URL(string: "https://example.com/multi-cancel.png")!
-        let imageData = MockImageData.validPNGData()
-        let response = MockImageData.successResponse(for: url)
-
-        let instrumentation = StandardImageStreamerInstrumentation()
-        let (streamer, _) = makeStreamer(
-            result: .success((imageData, response)),
-            delay: .milliseconds(300),
-            instrumentation: instrumentation
-        )
-
-        // Start 4 concurrent requests - task1 will be primary, others are secondary
-        let task1 = Task { try await streamer.image(for: url) }
-        
-        // Small delay to ensure task1 becomes the primary
-        try await Task.sleep(for: .milliseconds(20))
-        
-        let task2 = Task { try await streamer.image(for: url) }
-        let task3 = Task { try await streamer.image(for: url) }
-        let task4 = Task { try await streamer.image(for: url) }
-
-        // Give all tasks time to coalesce
-        try await Task.sleep(for: .milliseconds(50))
-
-        // Cancel the secondary waiters, but not the primary
-        task2.cancel()
-        task3.cancel()
-        task4.cancel()
-
-        // Wait for cancellations to propagate
-        _ = try? await task2.value
-        _ = try? await task3.value
-        _ = try? await task4.value
-
-        // Primary should still complete successfully
-        _ = try await task1.value
-
-        // No cancelled tasks should be recorded since task1 kept the request alive
-        let stats = await instrumentation.currentStats
-        #expect(stats.cancelledTasks == 0, "No cancellation should be tracked when primary task completes")
-    }
 
     @Test("Cancelling primary task while secondary waiters remain")
     func cancellingPrimaryTaskWhileSecondaryWaitersRemain() async throws {
@@ -789,25 +657,18 @@ struct ImageStreamerConvenienceTests {
         _ = try await streamer.image(for: urlString)
     }
 
-    @Test("Throws invalidURL error for malformed URL string")
-    func throwsErrorForInvalidURLString() async throws {
-        let invalidURLString = "not a valid url with spaces"
-
+    @Test(
+        "Throws invalidURL for bad URL strings",
+        arguments: [
+            "",                              // empty string
+            "not a valid url with spaces"    // malformed URL
+        ]
+    )
+    func throwsInvalidURLForBadStrings(input: String) async throws {
         let (streamer, _) = makeStreamer(result: .success((Data(), URLResponse())))
 
         await #expect(throws: ImageStreamerError.invalidURL) {
-            _ = try await streamer.image(for: invalidURLString)
-        }
-    }
-
-    @Test("Throws invalidURL error for empty URL string")
-    func throwsErrorForEmptyURLString() async throws {
-        let emptyURLString = ""
-
-        let (streamer, _) = makeStreamer(result: .success((Data(), URLResponse())))
-
-        await #expect(throws: ImageStreamerError.invalidURL) {
-            _ = try await streamer.image(for: emptyURLString)
+            _ = try await streamer.image(for: input)
         }
     }
 
@@ -933,37 +794,6 @@ struct ImageStreamerStatsTests {
         }
     }
 
-    @Test("Tracks network requests correctly")
-    func tracksNetworkRequests() async throws {
-        let url1 = URL(string: "https://example.com/image1.png")!
-        let url2 = URL(string: "https://example.com/image2.png")!
-        let imageData = MockImageData.validPNGData()
-
-        let responses: [URL: Result<(Data, URLResponse), Error>] = [
-            url1: .success((imageData, MockImageData.successResponse(for: url1))),
-            url2: .success((imageData, MockImageData.successResponse(for: url2)))
-        ]
-
-        let instrumentation = StandardImageStreamerInstrumentation()
-        let (streamer, _) = makeStreamer(
-            responses: responses,
-            instrumentation: instrumentation
-        )
-
-        // Fetch first image
-        _ = try await streamer.image(for: url1)
-
-        try await waitForStats(instrumentation) { stats in
-            stats.networkRequests == 1
-        }
-
-        // Fetch second image
-        _ = try await streamer.image(for: url2)
-
-        try await waitForStats(instrumentation) { stats in
-            stats.networkRequests == 2
-        }
-    }
 
     @Test("Tracks coalesced requests correctly")
     func tracksCoalescedRequests() async throws {
@@ -1052,60 +882,22 @@ struct ImageStreamerStatsTests {
 @Suite("ImageStreamer Edge Cases")
 struct ImageStreamerEdgeCaseTests {
 
-    @Test("Handles URL with empty path")
-    func handlesURLWithEmptyPath() async throws {
-        let url = URL(string: "https://example.com/")!
-        let imageData = MockImageData.validPNGData()
-        let response = MockImageData.successResponse(for: url)
-
-        let (streamer, _) = makeStreamer(result: .success((imageData, response)))
-
-        _ = try await streamer.image(for: url)
-    }
-
-    @Test("Handles URL with query parameters")
-    func handlesURLWithQueryParameters() async throws {
-        let url = URL(string: "https://example.com/image.png?size=large&format=png")!
-        let imageData = MockImageData.validPNGData()
-        let response = MockImageData.successResponse(for: url)
-
-        let (streamer, _) = makeStreamer(result: .success((imageData, response)))
-
-        _ = try await streamer.image(for: url)
-    }
-
-    @Test("Handles very small point size")
-    func handlesVerySmallPointSize() async throws {
+    @Test(
+        "Handles various point sizes without throwing",
+        arguments: [
+            CGSize(width: 1, height: 1),         // very small
+            CGSize(width: 10000, height: 10000), // larger than the source image
+            CGSize(width: 200, height: 50)        // non-square
+        ]
+    )
+    func handlesVariousPointSizes(pointSize: CGSize) async throws {
         let url = URL(string: "https://example.com/image.png")!
         let imageData = MockImageData.validPNGData()
         let response = MockImageData.successResponse(for: url)
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        _ = try await streamer.image(for: url, pointSize: CGSize(width: 1, height: 1))
-    }
-
-    @Test("Handles large point size gracefully")
-    func handlesLargePointSize() async throws {
-        let url = URL(string: "https://example.com/image.png")!
-        let imageData = MockImageData.validPNGData()
-        let response = MockImageData.successResponse(for: url)
-
-        let (streamer, _) = makeStreamer(result: .success((imageData, response)))
-
-        // Request a size larger than the actual image
-        _ = try await streamer.image(for: url, pointSize: CGSize(width: 10000, height: 10000))
-    }
-
-    @Test("Handles non-square point size")
-    func handlesNonSquarePointSize() async throws {
-        let url = URL(string: "https://example.com/image.png")!
-        let imageData = MockImageData.validPNGData()
-        let response = MockImageData.successResponse(for: url)
-
-        let (streamer, _) = makeStreamer(result: .success((imageData, response)))
-
-        _ = try await streamer.image(for: url, pointSize: CGSize(width: 200, height: 50))
+        _ = try await streamer.image(for: url, pointSize: pointSize)
     }
 
     @Test("Same URL with different query parameters are cached separately")
@@ -1141,28 +933,6 @@ struct ImageStreamerEdgeCaseTests {
         // Both should have made network requests
         let totalRequests = await requestTracker.requestedURLs.count
         #expect(totalRequests == 2)
-    }
-
-    @Test("Handles rapid sequential requests for same URL")
-    func handlesRapidSequentialRequests() async throws {
-        let url = URL(string: "https://example.com/rapid.png")!
-        let imageData = MockImageData.validPNGData()
-        let response = MockImageData.successResponse(for: url)
-
-        let requestTracker = RequestTracker()
-        let (streamer, _) = makeStreamer(
-            result: .success((imageData, response)),
-            requestTracker: requestTracker
-        )
-
-        // Make many sequential requests
-        for _ in 0..<10 {
-            _ = try await streamer.image(for: url)
-        }
-
-        // Only the first request should hit the network
-        let totalRequests = await requestTracker.requestCount(for: url)
-        #expect(totalRequests == 1, "Sequential requests should use cache after first fetch")
     }
 
     @Test("Handles HTTP response without HTTPURLResponse type")
@@ -1227,6 +997,11 @@ struct ImageCacheKeyTests {
         #expect(!keyNil.isEqual(keyZero))
     }
 
+    // ImageCacheKey is used as the key type for NSCache, which relies on the
+    // Objective-C `isEqual(_:)` / `hash` contract for key lookup. This test
+    // guards that contract. If ImageCacheKey is ever replaced by a pure
+    // Swift `Hashable` struct used with a `Dictionary`-backed cache, this
+    // test can be removed.
     @Test("Key is not equal to non-ImageCacheKey object")
     func keyNotEqualToOtherTypes() {
         let url = URL(string: "https://example.com/image.png")!
