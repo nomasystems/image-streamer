@@ -115,22 +115,17 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
 
         // Check for active tasks - join as a secondary waiter
         if var existingTaskInfo = activeTasks[key] {
-            await instrumentation?.notifyCoalescedRequest()
-
-            // Increment waiter count
+            // Increment waiter count first to avoid reentrancy race during await
             existingTaskInfo.waiterCount += 1
             activeTasks[key] = existingTaskInfo
+
+            Task {
+                await instrumentation?.notifyCoalescedRequest()
+            }
 
             let taskToAwait = existingTaskInfo.task
 
             return try await withTaskCancellationHandler {
-                defer {
-                    // Always decrement waiter count when this caller finishes (success or failure)
-                    // This runs back on the actor after the await completes
-                    Task { [weak self] in
-                        await self?.decrementWaiterCount(for: key)
-                    }
-                }
                 return try await taskToAwait.value
             } onCancel: { [weak self] in
                 Task {
@@ -140,9 +135,11 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
         }
 
         // No existing task - create the primary task
-        await instrumentation?.notifyNetworkRequest()
+        Task {
+            await instrumentation?.notifyNetworkRequest()
+        }
 
-        let task = Task { [weak self] () -> PlatformImage in
+        let task = Task.detached { [weak self] () -> PlatformImage in
             guard let self else { throw CancellationError() }
             return try await self.fetchRemoteImage(url: url, pointSize: pointSize)
         }
@@ -204,7 +201,7 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
         }
     }
 
-    private func fetchRemoteImage(url: URL, pointSize: CGSize?) async throws -> PlatformImage {
+    private nonisolated func fetchRemoteImage(url: URL, pointSize: CGSize?) async throws -> PlatformImage {
 
         try Task.checkCancellation()
 
@@ -235,7 +232,7 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
         }
     }
 
-    private func downsample(imageData: Data, to pointSize: CGSize) async -> PlatformImage? {
+    private nonisolated func downsample(imageData: Data, to pointSize: CGSize) async -> PlatformImage? {
         // Create an image source without decoding immediately
         let imageSourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let imageSource = CGImageSourceCreateWithData(imageData as CFData, imageSourceOptions) else {
