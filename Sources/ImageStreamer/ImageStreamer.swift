@@ -126,7 +126,9 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
             let taskToAwait = existingTaskInfo.task
 
             return try await withTaskCancellationHandler {
-                return try await taskToAwait.value
+                let result = try await taskToAwait.value
+                try Task.checkCancellation()
+                return result
             } onCancel: { [weak self] in
                 Task {
                     await self?.handleCancellation(for: key)
@@ -164,21 +166,7 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
         }
     }
 
-    /// Decrements the waiter count for secondary waiters after they complete.
-    /// This is separate from cancellation handling.
-    private func decrementWaiterCount(for key: ImageCacheKey) {
-        guard var coalescedTask = activeTasks[key] else { return }
-        
-        coalescedTask.waiterCount -= 1
-        
-        if coalescedTask.waiterCount <= 0 {
-            // This shouldn't normally happen here since the primary task
-            // should clean up, but handle it defensively
-            activeTasks[key] = nil
-        } else {
-            activeTasks[key] = coalescedTask
-        }
-    }
+
 
     private func handleCancellation(for key: ImageCacheKey) {
         guard var coalescedTask = activeTasks[key] else { return }
@@ -219,11 +207,25 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
         if let pointSize = pointSize {
             image = await downsample(imageData: data, to: pointSize)
         } else {
-            image = PlatformImage(data: data)
+            let rawImage = PlatformImage(data: data)
+            #if canImport(UIKit)
+            if #available(iOS 15.0, tvOS 15.0, watchOS 8.0, *) {
+                image = await rawImage?.byPreparingForDisplay() ?? rawImage
+            } else {
+                image = rawImage
+            }
+            #else
+            image = rawImage
+            #endif
         }
 
         if let image {
-            let cost = Int(image.size.width * image.size.height * 4)
+            #if canImport(UIKit)
+            let scale = image.scale
+            #else
+            let scale: CGFloat = 1.0
+            #endif
+            let cost = Int((image.size.width * scale) * (image.size.height * scale) * 4)
             cache.setObject(image, forKey: ImageCacheKey(url: url, pointSize: pointSize), cost: cost)
 
             return image
@@ -245,9 +247,9 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
         #elseif os(visionOS)
         scale = 2.0
         #elseif canImport(UIKit)
-        scale = await UIScreen.main.scale
+        scale = 3.0 // Using highest typical scale statically to avoid MainActor hop
         #elseif canImport(AppKit)
-        scale = NSScreen.main?.backingScaleFactor ?? 1.0
+        scale = 2.0
         #else
         scale = 1.0
         #endif

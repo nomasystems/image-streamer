@@ -657,9 +657,7 @@ struct ImageStreamerConvenienceTests {
         _ = try await streamer.image(for: urlString)
     }
 
-    @Test(
-        "Throws invalidURL for bad URL strings",
-        arguments: [
+    @Test("Throws invalidURL for bad URL strings", arguments: [
             "",                              // empty string
             "not a valid url with spaces"    // malformed URL
         ]
