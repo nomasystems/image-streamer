@@ -93,8 +93,8 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
 
         // Fast path: Check cache without entering actor serialization
         if let cachedImage = self.cache.object(forKey: key) {
-            Task { [weak self] in
-                await self?.instrumentation?.notifyCacheHit()
+            if let inst = instrumentation {
+                Task.detached { await inst.notifyCacheHit() }
             }
             return cachedImage
         }
@@ -109,7 +109,9 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
 
         // Double-check cache in case another task populated it while we were waiting to enter the actor
         if let cachedImage = self.cache.object(forKey: key) {
-            await instrumentation?.notifyCacheHit()
+            if let inst = instrumentation {
+                Task.detached { await inst.notifyCacheHit() }
+            }
             return cachedImage
         }
 
@@ -119,8 +121,8 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
             existingTaskInfo.waiterCount += 1
             activeTasks[key] = existingTaskInfo
 
-            Task {
-                await instrumentation?.notifyCoalescedRequest()
+            if let inst = instrumentation {
+                Task.detached { await inst.notifyCoalescedRequest() }
             }
 
             let taskToAwait = existingTaskInfo.task
@@ -137,8 +139,8 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
         }
 
         // No existing task - create the primary task
-        Task {
-            await instrumentation?.notifyNetworkRequest()
+        if let inst = instrumentation {
+            Task.detached { await inst.notifyNetworkRequest() }
         }
 
         let task = Task.detached { [weak self] () -> PlatformImage in
@@ -151,6 +153,7 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
         return try await withTaskCancellationHandler {
             do {
                 let result = try await task.value
+                try Task.checkCancellation()
                 // Primary task completed successfully - clean up
                 activeTasks[key] = nil
                 return result
@@ -180,8 +183,8 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
             activeTasks[key] = nil
             
             // Only track as cancelled when we actually cancel the network request
-            Task { [weak self] in
-                await self?.instrumentation?.notifyCancelledTask()
+            if let inst = instrumentation {
+                Task.detached { await inst.notifyCancelledTask() }
             }
         } else {
             // Still have waiters, keep the task alive - don't count as cancelled
@@ -247,7 +250,7 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
         #elseif os(visionOS)
         scale = 2.0
         #elseif canImport(UIKit)
-        scale = 3.0 // Using highest typical scale statically to avoid MainActor hop
+        scale = 3.0 // Using highest typical scale statically
         #elseif canImport(AppKit)
         scale = 2.0
         #else

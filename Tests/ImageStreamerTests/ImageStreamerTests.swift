@@ -17,7 +17,7 @@ struct ImageStreamerCoreTests {
 
         let image = try await streamer.image(for: url)
 
-        #expect(image != nil)
+        #expect(image.cgImage != nil)
     }
 
     @Test("Loads and downsamples image to specified point size")
@@ -30,7 +30,7 @@ struct ImageStreamerCoreTests {
 
         let image = try await streamer.image(for: url, pointSize: CGSize(width: 100, height: 100))
 
-        #expect(image != nil)
+        #expect(image.cgImage != nil)
     }
 
     @Test("Throws invalidImageData error for corrupt data")
