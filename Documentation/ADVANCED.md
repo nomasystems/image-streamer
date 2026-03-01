@@ -72,3 +72,25 @@ public init(
 ```
 
 For instance, you might want to create an `ImageFetching` layer that attaches Auth tokens, applies custom retry logic, or pulls from a local disk cache before hitting `URLSession`.
+
+## Image Decoding & Format Support
+
+`ImageStreamer` relies on native system decoders. The level of support varies depending on whether the image is downsampled.
+
+### Decoding Paths
+
+1.  **Downsampling Path (`pointSize` provided)**:
+    Uses `CGImageSourceCreateThumbnailAtIndex` (`ImageIO`). This is the most memory-efficient way to load large images into small thumbnails but is strictly limited to raster formats.
+    -   **Raster**: Fully supported (JPEG, PNG, HEIC, WebP, etc.).
+    -   **GIFs**: Decodes the **first frame only**.
+    -   **Vector (SVG/PDF)**: Not supported in this path. `ImageIO` cannot rasterize raw vector data during downsampling.
+
+2.  **Full-Size Path (`pointSize` is `nil`)**:
+    Uses platform-native initializers like `UIImage(data:)` or `NSImage(data:)`.
+    -   **Raster**: Broadly supported.
+    -   **Vector (SVG/PDF)**: Support is OS-dependent. While modern versions of iOS/macOS have added native SVG support, downloading raw SVG/PDF data and initializing a `PlatformImage` directly can be inconsistent compared to using Asset Catalogs.
+
+### Recommendations
+
+-   **WebP/AVIF**: These are excellent choices for modern Apple platforms (iOS 14+/16+ respectively) due to their high compression efficiency.
+-   **SVGs**: If your app relies heavily on SVGs from remote URLs, consider a specialized SVG library or ensuring they are handled without `pointSize` constraints, though native results may vary.

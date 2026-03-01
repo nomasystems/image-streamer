@@ -1014,7 +1014,7 @@ struct ImageCacheKeyTests {
 // MARK: - Test Helpers
 
 /// Creates a configured ImageStreamer with its dependencies for testing.
-private func makeStreamer(
+func makeStreamer(
     result: Result<(Data, URLResponse), Error>,
     delay: Duration? = nil,
     requestTracker: RequestTracker? = nil,
@@ -1035,7 +1035,7 @@ private func makeStreamer(
 }
 
 /// Creates a configured ImageStreamer with URL-based response mapping.
-private func makeStreamer(
+func makeStreamer(
     responses: [URL: Result<(Data, URLResponse), Error>],
     delay: Duration? = nil,
     requestTracker: RequestTracker? = nil,

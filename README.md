@@ -27,7 +27,7 @@ ImageStreamer leverages native system decoders. Support depends on whether you a
 | Format | Downsampled | Full-Size |
 | :--- | :--- | :--- |
 | **Raster** (JPEG, PNG, HEIC, WebP) | ✅ Full Support | ✅ Full Support |
-| **GIF** | ⚠️ First frame only | ✅ Full Support |
+| **GIF** | ⚠️ First frame only | ⚠️ First frame only |
 | **Vector** (SVG, PDF) | ❌ Not Supported | ⚠️ OS-Dependent |
 
 For more technical details, see the [Advanced Topics](Documentation/ADVANCED.md#image-decoding--format-support) section.
