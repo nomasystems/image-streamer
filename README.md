@@ -14,7 +14,7 @@
 ## Features
 
 -   **Task Coalescing**: Merges duplicate requests for the same URL automatically.
--   **Task Cancellation**: Cancel requests when they're no longer needed.
+-   **Task Cancellation**: Controlled cancel requests when they're no longer needed: checks for task cancellation before making a network request, and before intensive CPU and memory usage.
 -   **Background Decoding & Downsampling**: smooth scrolling and lesser memory usage.
 -   **Smart Caching**: `NSCache`, light, thread-safe, and gracefully prunes itself —It won't crash your app with an Out-of-Memory (OOM) error
 -   **Native Async/Await**: Clean, readable, and safe code.

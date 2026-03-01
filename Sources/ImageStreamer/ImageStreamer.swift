@@ -211,8 +211,8 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
             image = await downsample(imageData: data, to: pointSize)
         } else {
             let rawImage = PlatformImage(data: data)
-            #if canImport(UIKit)
-            if #available(iOS 15.0, tvOS 15.0, watchOS 8.0, *) {
+            #if canImport(UIKit) && !os(watchOS)
+            if #available(iOS 15.0, tvOS 15.0, *) {
                 image = await rawImage?.byPreparingForDisplay() ?? rawImage
             } else {
                 image = rawImage
