@@ -20,19 +20,17 @@
 -   **Native Async/Await**: Clean, readable, and safe code.
 -   **SwiftUI Ready**: Seamless integration via `EnvironmentValues`.
 
-### Customization and Dependency Injection
+## Supported Formats
 
-The entire `ImageStreamer` sits behind protocols (`ImageStreamerProtocol`, `ImageFetching`), which makes it simple to provide your own caches or mock networks for unit testing.
+ImageStreamer leverages native system decoders. Support depends on whether you are using **downsampling** (`pointSize` parameter).
 
-```swift
-public init(
-    session: ImageFetching = URLSession.shared,
-    cache: NSCache<ImageCacheKey, PlatformImage> = NSCache(),
-    instrumentation: ImageStreamerInstrumentation? = nil
-)
-```
+| Format | Downsampled | Full-Size |
+| :--- | :--- | :--- |
+| **Raster** (JPEG, PNG, HEIC, WebP) | ✅ Full Support | ✅ Full Support |
+| **GIF** | ⚠️ First frame only | ✅ Full Support |
+| **Vector** (SVG, PDF) | ❌ Not Supported | ⚠️ OS-Dependent |
 
-For instance, you might want to create an `ImageFetching` layer that attaches Auth tokens, applies custom retry logic, or pulls from a local disk cache before hitting `URLSession`.
+For more technical details, see the [Advanced Topics](Documentation/ADVANCED.md#image-decoding--format-support) section.
 
 ## Documentation
 
@@ -46,7 +44,7 @@ Add `ImageStreamer` to the `dependencies` value of your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/nomasystems/image-streamer.git", from: "1.0.0")
+    .package(url: "https://github.com/nomasystems/image-streamer.git", from: "1.0.1")
 ]
 
 ```
@@ -69,8 +67,24 @@ targets: [
 1. Open your project in Xcode.
 2. Go to **File > Add Package Dependencies...**
 3. Enter the repository URL: `https://github.com/nomasystems/image-streamer.git`
-4. Set the **Dependency Rule** to **Up to Next Major Version** and enter `1.0.0`.
+4. Set the **Dependency Rule** to **Up to Next Major Version** and enter `1.0.1`.
 5. Select the project target where you want to use the library.
+
+---
+
+### Customization and Dependency Injection
+
+The entire `ImageStreamer` sits behind protocols (`ImageStreamerProtocol`, `ImageFetching`), which makes it simple to provide your own caches or mock networks for unit testing.
+
+```swift
+public init(
+    session: ImageFetching = URLSession.shared,
+    cache: NSCache<ImageCacheKey, PlatformImage> = NSCache(),
+    instrumentation: ImageStreamerInstrumentation? = nil
+)
+```
+
+For instance, you might want to create an `ImageFetching` layer that attaches Auth tokens, applies custom retry logic, or pulls from a local disk cache before hitting `URLSession`.
 
 ## License
 
