@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Background Decoding Guarantee**: `downsample` and `fetchRemoteImage` are now marked `@concurrent`, ensuring image decoding always runs on the cooperative thread pool even when the `NonisolatedNonsendingByDefault` language mode is active.
 - **Coalescing Race**: Cleanup and cancellation bookkeeping now verify task identity before touching the active-task table, preventing a stale cancellation handler from cancelling a newer, unrelated request for the same URL.
 - **Cancellation Error Normalization**: Cancelled requests now consistently throw `CancellationError`, even when the underlying `URLSession` surfaces `URLError(.cancelled)`.
 - **Idle Instrumentation Wakeups**: `StandardImageStreamerInstrumentation` no longer runs a permanent 10Hz polling task; broadcasts are scheduled on demand (still throttled to ~10Hz under load).

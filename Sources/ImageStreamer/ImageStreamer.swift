@@ -9,7 +9,7 @@ public typealias PlatformImage = UIImage
 import AppKit
 public typealias PlatformImage = NSImage
 #else
-    #error("Unsupported platform")
+#error("Unsupported platform")
 #endif
 
 /// Protocol to abstract the actual network fetching.
@@ -184,8 +184,6 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
             }
         }
     }
-
-
 
     private func handleCancellation(for key: ImageCacheKey, task: Task<PlatformImage, Error>) {
         // This runs from an unstructured task at an arbitrary later time. The entry for
