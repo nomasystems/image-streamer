@@ -207,19 +207,29 @@ struct ImageStreamerCoalescingTests {
         let response = MockImageData.successResponse(for: url)
 
         let requestTracker = RequestTracker()
-        let (streamer, _) = makeStreamer(
+        let instrumentation = StandardImageStreamerInstrumentation()
+        let (streamer, gate) = makeGatedStreamer(
             result: .success((imageData, response)),
-            delay: .milliseconds(200), // Longer delay to ensure coalescing
-            requestTracker: requestTracker
+            requestTracker: requestTracker,
+            instrumentation: instrumentation
         )
 
-        // Start multiple concurrent requests
-        async let image1 = streamer.image(for: url)
-        async let image2 = streamer.image(for: url)
-        async let image3 = streamer.image(for: url)
+        // Start multiple concurrent requests; the primary blocks on the gate
+        let tasks = (0..<3).map { _ in
+            Task { try await streamer.image(for: url) }
+        }
+
+        // Wait until both secondary requests have actually joined the primary,
+        // then release the fetch
+        try await waitForStats(instrumentation) { stats in
+            stats.networkRequests == 1 && stats.coalescedRequests == 2
+        }
+        await gate.open()
 
         // All should complete without throwing
-        _ = try await (image1, image2, image3)
+        for task in tasks {
+            _ = try await task.value
+        }
 
         // But only one network request should have been made
         let totalRequests = await requestTracker.requestCount(for: url)
@@ -259,16 +269,23 @@ struct ImageStreamerCoalescingTests {
         let response = MockImageData.successResponse(for: url)
 
         let requestTracker = RequestTracker()
-        let (streamer, _) = makeStreamer(
+        let instrumentation = StandardImageStreamerInstrumentation()
+        let (streamer, gate) = makeGatedStreamer(
             result: .success((invalidData, response)),
-            delay: .milliseconds(100),
-            requestTracker: requestTracker
+            requestTracker: requestTracker,
+            instrumentation: instrumentation
         )
 
         // Start multiple concurrent requests that will all fail
         let task1 = Task { try await streamer.image(for: url) }
         let task2 = Task { try await streamer.image(for: url) }
         let task3 = Task { try await streamer.image(for: url) }
+
+        // Wait until both secondary requests have joined the primary before failing it
+        try await waitForStats(instrumentation) { stats in
+            stats.networkRequests == 1 && stats.coalescedRequests == 2
+        }
+        await gate.open()
 
         // All should throw the same error
         await #expect(throws: ImageStreamerError.invalidImageData) {
@@ -294,9 +311,8 @@ struct ImageStreamerCoalescingTests {
 
         let instrumentation = StandardImageStreamerInstrumentation()
         let requestTracker = RequestTracker()
-        let (streamer, _) = makeStreamer(
+        let (streamer, gate) = makeGatedStreamer(
             result: .success((imageData, response)),
-            delay: .milliseconds(200),
             requestTracker: requestTracker,
             instrumentation: instrumentation
         )
@@ -305,6 +321,12 @@ struct ImageStreamerCoalescingTests {
         let tasks = (0..<5).map { _ in
             Task { try await streamer.image(for: url) }
         }
+
+        // Wait until all 4 secondary requests have joined the primary, then release it
+        try await waitForStats(instrumentation) { stats in
+            stats.networkRequests == 1 && stats.coalescedRequests == 4
+        }
+        await gate.open()
 
         // All should complete successfully without throwing
         for task in tasks {
@@ -800,22 +822,24 @@ struct ImageStreamerStatsTests {
         let response = MockImageData.successResponse(for: url)
 
         let instrumentation = StandardImageStreamerInstrumentation()
-        let (streamer, _) = makeStreamer(
+        let (streamer, gate) = makeGatedStreamer(
             result: .success((imageData, response)),
-            delay: .milliseconds(200),
             instrumentation: instrumentation
         )
 
-        // Start multiple concurrent requests
-        async let image1 = streamer.image(for: url)
-        async let image2 = streamer.image(for: url)
-        async let image3 = streamer.image(for: url)
-
-        _ = try await (image1, image2, image3)
+        // Start multiple concurrent requests; the primary blocks on the gate
+        let tasks = (0..<3).map { _ in
+            Task { try await streamer.image(for: url) }
+        }
 
         // One network request, two coalesced requests
         try await waitForStats(instrumentation) { stats in
             stats.networkRequests == 1 && stats.coalescedRequests == 2
+        }
+        await gate.open()
+
+        for task in tasks {
+            _ = try await task.value
         }
     }
 
@@ -1019,13 +1043,13 @@ func makeStreamer(
     delay: Duration? = nil,
     requestTracker: RequestTracker? = nil,
     instrumentation: ImageStreamerInstrumentation? = nil
-) -> (streamer: ImageStreamer, cache: NSCache<ImageCacheKey, PlatformImage>) {
+) -> (streamer: ImageStreamer, cache: ImageCache) {
     let mockFetcher = MockImageFetcher(
         result: result,
         delay: delay,
         requestTracker: requestTracker
     )
-    let cache = NSCache<ImageCacheKey, PlatformImage>()
+    let cache = ImageCache()
     let streamer = ImageStreamer(
         session: mockFetcher,
         cache: cache,
@@ -1040,19 +1064,40 @@ func makeStreamer(
     delay: Duration? = nil,
     requestTracker: RequestTracker? = nil,
     instrumentation: ImageStreamerInstrumentation? = nil
-) -> (streamer: ImageStreamer, cache: NSCache<ImageCacheKey, PlatformImage>) {
+) -> (streamer: ImageStreamer, cache: ImageCache) {
     let mockFetcher = URLMappingMockFetcher(
         responses: responses,
         delay: delay,
         requestTracker: requestTracker
     )
-    let cache = NSCache<ImageCacheKey, PlatformImage>()
+    let cache = ImageCache()
     let streamer = ImageStreamer(
         session: mockFetcher,
         cache: cache,
         instrumentation: instrumentation
     )
     return (streamer, cache)
+}
+
+/// Creates a configured ImageStreamer whose fetches block until the returned gate is opened.
+/// Use this (instead of fixed delays) when a test must guarantee that requests overlap.
+func makeGatedStreamer(
+    result: Result<(Data, URLResponse), Error>,
+    requestTracker: RequestTracker? = nil,
+    instrumentation: ImageStreamerInstrumentation? = nil
+) -> (streamer: ImageStreamer, gate: RequestGate) {
+    let gate = RequestGate()
+    let mockFetcher = GatedMockFetcher(
+        result: result,
+        gate: gate,
+        requestTracker: requestTracker
+    )
+    let streamer = ImageStreamer(
+        session: mockFetcher,
+        cache: ImageCache(),
+        instrumentation: instrumentation
+    )
+    return (streamer, gate)
 }
 
 /// Helper to wait for async stats updates with timeout.

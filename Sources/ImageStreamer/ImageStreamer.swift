@@ -64,7 +64,7 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
 
     // MARK: - Dependencies
     private nonisolated let session: ImageFetching
-    private nonisolated let cache: NSCache<ImageCacheKey, PlatformImage>
+    private nonisolated let cache: ImageCache
 
     private var activeTasks: [ImageCacheKey: CoalescedTask] = [:]
 
@@ -78,7 +78,7 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
     ///   - instrumentation: Optional instrumentation for collecting statistics.
     public init(
         session: ImageFetching = URLSession.shared,
-        cache: NSCache<ImageCacheKey, PlatformImage> = NSCache<ImageCacheKey, PlatformImage>(),
+        cache: ImageCache = ImageCache(),
         instrumentation: ImageStreamerInstrumentation? = nil
     ) {
         self.session = session
@@ -94,7 +94,7 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
         // Fast path: Check cache without entering actor serialization
         if let cachedImage = self.cache.object(forKey: key) {
             if let inst = instrumentation {
-                Task.detached { await inst.notifyCacheHit() }
+                Task { await inst.notifyCacheHit() }
             }
             return cachedImage
         }
@@ -110,7 +110,7 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
         // Double-check cache in case another task populated it while we were waiting to enter the actor
         if let cachedImage = self.cache.object(forKey: key) {
             if let inst = instrumentation {
-                Task.detached { await inst.notifyCacheHit() }
+                Task { await inst.notifyCacheHit() }
             }
             return cachedImage
         }
@@ -122,28 +122,35 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
             activeTasks[key] = existingTaskInfo
 
             if let inst = instrumentation {
-                Task.detached { await inst.notifyCoalescedRequest() }
+                Task { await inst.notifyCoalescedRequest() }
             }
 
             let taskToAwait = existingTaskInfo.task
 
             return try await withTaskCancellationHandler {
-                let result = try await taskToAwait.value
-                try Task.checkCancellation()
-                return result
+                do {
+                    let result = try await taskToAwait.value
+                    try Task.checkCancellation()
+                    return result
+                } catch {
+                    // Surface this caller's cancellation as CancellationError rather than
+                    // whatever the underlying fetch threw (e.g. URLError(.cancelled)).
+                    try Task.checkCancellation()
+                    throw error
+                }
             } onCancel: { [weak self] in
                 Task {
-                    await self?.handleCancellation(for: key)
+                    await self?.handleCancellation(for: key, task: taskToAwait)
                 }
             }
         }
 
         // No existing task - create the primary task
         if let inst = instrumentation {
-            Task.detached { await inst.notifyNetworkRequest() }
+            Task { await inst.notifyNetworkRequest() }
         }
 
-        let task = Task.detached { [weak self] () -> PlatformImage in
+        let task = Task { [weak self] () -> PlatformImage in
             guard let self else { throw CancellationError() }
             return try await self.fetchRemoteImage(url: url, pointSize: pointSize)
         }
@@ -154,25 +161,37 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
             do {
                 let result = try await task.value
                 try Task.checkCancellation()
-                // Primary task completed successfully - clean up
-                activeTasks[key] = nil
+                // Primary task completed successfully - clean up.
+                // The entry may have been replaced by a newer request for the same key
+                // while we were suspended, so only remove it if it is still ours.
+                if activeTasks[key]?.task == task {
+                    activeTasks[key] = nil
+                }
                 return result
             } catch {
-                // Clean up on error
-                activeTasks[key] = nil
+                // Clean up on error, again only if the entry is still ours
+                if activeTasks[key]?.task == task {
+                    activeTasks[key] = nil
+                }
+                // Surface this caller's cancellation as CancellationError rather than
+                // whatever the underlying fetch threw (e.g. URLError(.cancelled)).
+                try Task.checkCancellation()
                 throw error
             }
         } onCancel: { [weak self] in
             Task {
-                await self?.handleCancellation(for: key)
+                await self?.handleCancellation(for: key, task: task)
             }
         }
     }
 
 
 
-    private func handleCancellation(for key: ImageCacheKey) {
-        guard var coalescedTask = activeTasks[key] else { return }
+    private func handleCancellation(for key: ImageCacheKey, task: Task<PlatformImage, Error>) {
+        // This runs from an unstructured task at an arbitrary later time. The entry for
+        // this key may already belong to a newer request, so only act on the entry the
+        // cancelled caller was actually waiting on.
+        guard var coalescedTask = activeTasks[key], coalescedTask.task == task else { return }
 
         // Decrement the waiter count
         coalescedTask.waiterCount -= 1
@@ -181,10 +200,10 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
             // No more waiters, cancel the underlying task and remove it
             coalescedTask.task.cancel()
             activeTasks[key] = nil
-            
+
             // Only track as cancelled when we actually cancel the network request
             if let inst = instrumentation {
-                Task.detached { await inst.notifyCancelledTask() }
+                Task { await inst.notifyCancelledTask() }
             }
         } else {
             // Still have waiters, keep the task alive - don't count as cancelled
@@ -298,7 +317,7 @@ public extension ImageStreamer {
 
 // MARK: - Public instrumentation API
 
-public protocol Instrumentable: Sendable, Actor {
+public protocol Instrumentable: Actor {
 
     nonisolated var instrumentation: ImageStreamerInstrumentation? { get }
 
@@ -324,11 +343,59 @@ extension Instrumentable {
 
 // MARK: - SwiftUI Environment Integration
 
-public extension EnvironmentValues {
-    @Entry var imageStreamer: ImageStreamerProtocol = ImageStreamer()
-    @Entry var instrumentation: ImageStreamerInstrumentation? = StandardImageStreamerInstrumentation()
+/// Shared instances backing the environment defaults. `@Entry` expands its default
+/// expression into a computed property that is re-evaluated on every fallback access,
+/// so the defaults must reference stable shared instances instead of constructing new
+/// ones inline. Sharing also keeps the default streamer wired to the default
+/// instrumentation, so stats observers see its activity.
+private enum ImageStreamerDefaults {
+    static let instrumentation = StandardImageStreamerInstrumentation()
+    static let streamer = ImageStreamer(instrumentation: instrumentation)
 }
 
-// Retroactive conformance to allow usage in nonisolated contexts.
-// NSCache is thread-safe documentation-wise.
-extension NSCache: @retroactive @unchecked Sendable {}
+public extension EnvironmentValues {
+    @Entry var imageStreamer: ImageStreamerProtocol = ImageStreamerDefaults.streamer
+    @Entry var instrumentation: ImageStreamerInstrumentation? = ImageStreamerDefaults.instrumentation
+}
+
+// MARK: - Image Cache
+
+/// A thread-safe in-memory image cache backed by `NSCache`.
+///
+/// Owning this wrapper lets the library vouch for its sendability (`NSCache` is
+/// documented thread-safe) without declaring a retroactive `Sendable` conformance
+/// on `NSCache` itself, which would apply process-wide to every module.
+public final class ImageCache: @unchecked Sendable {
+
+    private let storage = NSCache<ImageCacheKey, PlatformImage>()
+
+    public init() {}
+
+    /// The maximum total cost the cache can hold before it starts evicting objects.
+    public var totalCostLimit: Int {
+        get { storage.totalCostLimit }
+        set { storage.totalCostLimit = newValue }
+    }
+
+    /// The maximum number of images the cache should hold.
+    public var countLimit: Int {
+        get { storage.countLimit }
+        set { storage.countLimit = newValue }
+    }
+
+    public func object(forKey key: ImageCacheKey) -> PlatformImage? {
+        storage.object(forKey: key)
+    }
+
+    public func setObject(_ image: PlatformImage, forKey key: ImageCacheKey, cost: Int) {
+        storage.setObject(image, forKey: key, cost: cost)
+    }
+
+    public func removeObject(forKey key: ImageCacheKey) {
+        storage.removeObject(forKey: key)
+    }
+
+    public func removeAllObjects() {
+        storage.removeAllObjects()
+    }
+}

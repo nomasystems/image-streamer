@@ -22,7 +22,7 @@ public struct ImageStreamerStats: Sendable, Equatable {
 // MARK: - Instrumentation Protocol
 
 /// Protocol defining the interface for collecting ImageStreamer statistics.
-public protocol ImageStreamerInstrumentation: Sendable, Actor {
+public protocol ImageStreamerInstrumentation: Actor {
     /// Notifies that a cache hit occurred.
     func notifyCacheHit()
     /// Notifies that a network request was started.
@@ -52,21 +52,13 @@ public actor StandardImageStreamerInstrumentation: ImageStreamerInstrumentation 
     
     /// Active continuations for stats observers
     private var statsContinuations: [UUID: AsyncStream<ImageStreamerStats>.Continuation] = [:]
-    
-    /// Throttling logic
-    private var needsBroadcast = false
-    
-    public init() {
-        // Start a throttling loop to prevent excessive UI updates
-        Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(100)) // 10Hz throttle
-                guard let self else { return }
-                await self.flushStats()
-            }
-        }
-    }
-    
+
+    /// Whether a throttled broadcast is already scheduled. Updates within the throttle
+    /// window coalesce into the single pending flush.
+    private var flushScheduled = false
+
+    public init() {}
+
     public var currentStats: ImageStreamerStats {
         ImageStreamerStats(
             cacheHits: cacheHits,
@@ -75,60 +67,77 @@ public actor StandardImageStreamerInstrumentation: ImageStreamerInstrumentation 
             cancelledTasks: cancelledTasks
         )
     }
-    
+
     /// Returns an `AsyncStream` that emits stats updates whenever they change.
     /// The stream automatically terminates when the consuming task is cancelled.
+    /// Observers only care about the latest snapshot, so older buffered values are dropped.
     public var statsStream: AsyncStream<ImageStreamerStats> {
-        AsyncStream { continuation in
-            let id = UUID()
-            
-            // Emit the current stats immediately
-            continuation.yield(self.currentStats)
-            
-            // Store the continuation so we can yield future updates
-            self.statsContinuations[id] = continuation
-            
-            // Clean up when the stream is terminated
-            continuation.onTermination = { @Sendable _ in
-                Task { await self.removeStatsContinuation(id: id) }
-            }
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: ImageStreamerStats.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        let id = UUID()
+
+        // Emit the current stats immediately
+        continuation.yield(currentStats)
+
+        // Store the continuation so we can yield future updates
+        statsContinuations[id] = continuation
+
+        // Clean up when the stream is terminated
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeStatsContinuation(id: id) }
         }
+
+        return stream
     }
-    
+
     private func removeStatsContinuation(id: UUID) {
         statsContinuations.removeValue(forKey: id)
     }
-    
-    /// Broadcasts the current stats to all active observers if pending updates exist
+
+    /// Schedules a throttled broadcast (at most one in flight) to prevent excessive UI updates.
+    private func scheduleFlush() {
+        guard !flushScheduled else { return }
+        flushScheduled = true
+
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(100)) // 10Hz throttle
+            await self?.performScheduledFlush()
+        }
+    }
+
+    private func performScheduledFlush() {
+        flushScheduled = false
+        flushStats()
+    }
+
+    /// Broadcasts the current stats to all active observers
     private func flushStats() {
-        guard needsBroadcast else { return }
-        
         let stats = currentStats
         for continuation in statsContinuations.values {
             continuation.yield(stats)
         }
-        
-        needsBroadcast = false
     }
-    
+
     public func notifyCacheHit() {
         cacheHits += 1
-        needsBroadcast = true
+        scheduleFlush()
     }
-    
+
     public func notifyNetworkRequest() {
         networkRequests += 1
-        needsBroadcast = true
+        scheduleFlush()
     }
-    
+
     public func notifyCoalescedRequest() {
         coalescedRequests += 1
-        needsBroadcast = true
+        scheduleFlush()
     }
-    
+
     public func notifyCancelledTask() {
         cancelledTasks += 1
-        needsBroadcast = true
+        scheduleFlush()
     }
 
     public func reset() {
@@ -136,8 +145,7 @@ public actor StandardImageStreamerInstrumentation: ImageStreamerInstrumentation 
         networkRequests = 0
         coalescedRequests = 0
         cancelledTasks = 0
-        needsBroadcast = true
-        // Force flush immediately on reset for responsiveness
+        // Flush immediately on reset for responsiveness
         flushStats()
     }
 }

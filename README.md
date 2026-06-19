@@ -79,7 +79,7 @@ The entire `ImageStreamer` sits behind protocols (`ImageStreamerProtocol`, `Imag
 ```swift
 public init(
     session: ImageFetching = URLSession.shared,
-    cache: NSCache<ImageCacheKey, PlatformImage> = NSCache(),
+    cache: ImageCache = ImageCache(),
     instrumentation: ImageStreamerInstrumentation? = nil
 )
 ```
