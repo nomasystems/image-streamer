@@ -211,6 +211,7 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
         }
     }
 
+    @concurrent
     private nonisolated func fetchRemoteImage(url: URL, pointSize: CGSize?) async throws -> PlatformImage {
 
         try Task.checkCancellation()
@@ -256,6 +257,7 @@ public actor ImageStreamer: ImageStreamerProtocol, Instrumentable {
         }
     }
 
+    @concurrent
     private nonisolated func downsample(imageData: Data, to pointSize: CGSize) async -> PlatformImage? {
         // Create an image source without decoding immediately
         let imageSourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
