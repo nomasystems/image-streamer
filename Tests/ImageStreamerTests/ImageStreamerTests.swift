@@ -17,20 +17,28 @@ struct ImageStreamerCoreTests {
 
         let image = try await streamer.image(for: url)
 
-        #expect(image.cgImage != nil)
+        #expect(extractCGImage(from: image) != nil)
     }
 
     @Test("Loads and downsamples image to specified point size")
     func loadsDownsampledImage() async throws {
         let url = URL(string: "https://example.com/large.png")!
-        let imageData = MockImageData.validPNGData()
+        let sourceDimension = 512
+        let imageData = MockImageData.largePNGData(dimension: sourceDimension)
         let response = MockImageData.successResponse(for: url)
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
         let image = try await streamer.image(for: url, pointSize: CGSize(width: 100, height: 100))
 
-        #expect(image.cgImage != nil)
+        // The downsample path must actually shrink the 512x512 source - a result still
+        // at the source size would mean downsampling silently did nothing.
+        let cgImage = try #require(extractCGImage(from: image))
+        #expect(
+            max(cgImage.width, cgImage.height) < sourceDimension,
+            "Downsampled image should be smaller than the \(sourceDimension)px source, got \(cgImage.width)x\(cgImage.height)"
+        )
+        #expect(cgImage.width > 0 && cgImage.height > 0)
     }
 
     @Test("Throws invalidImageData error for corrupt data")
@@ -54,9 +62,10 @@ struct ImageStreamerCoreTests {
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        await #expect(throws: URLError.self) {
+        let error = await #expect(throws: URLError.self) {
             _ = try await streamer.image(for: url)
         }
+        #expect(error?.code == .badServerResponse)
     }
 
     @Test("Propagates network errors from the session")
@@ -66,9 +75,10 @@ struct ImageStreamerCoreTests {
 
         let (streamer, _) = makeStreamer(result: .failure(networkError))
 
-        await #expect(throws: URLError.self) {
+        let error = await #expect(throws: URLError.self) {
             _ = try await streamer.image(for: url)
         }
+        #expect(error?.code == .notConnectedToInternet)
     }
 }
 
@@ -208,7 +218,7 @@ struct ImageStreamerCoalescingTests {
 
         let requestTracker = RequestTracker()
         let instrumentation = StandardImageStreamerInstrumentation()
-        let (streamer, gate) = makeGatedStreamer(
+        let (streamer, gate, _) = makeGatedStreamer(
             result: .success((imageData, response)),
             requestTracker: requestTracker,
             instrumentation: instrumentation
@@ -244,9 +254,10 @@ struct ImageStreamerCoalescingTests {
         let response = MockImageData.successResponse(for: url)
 
         let requestTracker = RequestTracker()
+        // No delay needed: these requests have distinct cache keys (different point
+        // sizes), so they can never coalesce regardless of timing.
         let (streamer, _) = makeStreamer(
             result: .success((imageData, response)),
-            delay: .milliseconds(100),
             requestTracker: requestTracker
         )
 
@@ -270,7 +281,7 @@ struct ImageStreamerCoalescingTests {
 
         let requestTracker = RequestTracker()
         let instrumentation = StandardImageStreamerInstrumentation()
-        let (streamer, gate) = makeGatedStreamer(
+        let (streamer, gate, _) = makeGatedStreamer(
             result: .success((invalidData, response)),
             requestTracker: requestTracker,
             instrumentation: instrumentation
@@ -311,7 +322,7 @@ struct ImageStreamerCoalescingTests {
 
         let instrumentation = StandardImageStreamerInstrumentation()
         let requestTracker = RequestTracker()
-        let (streamer, gate) = makeGatedStreamer(
+        let (streamer, gate, _) = makeGatedStreamer(
             result: .success((imageData, response)),
             requestTracker: requestTracker,
             instrumentation: instrumentation
@@ -328,19 +339,20 @@ struct ImageStreamerCoalescingTests {
         }
         await gate.open()
 
-        // All should complete successfully without throwing
+        // Every waiter must receive the exact same image instance produced by the
+        // single shared fetch - that is the whole point of coalescing.
+        var images: [PlatformImage] = []
         for task in tasks {
-            _ = try await task.value
+            images.append(try await task.value)
+        }
+        let first = try #require(images.first)
+        for image in images.dropFirst() {
+            #expect(image === first, "All coalesced waiters should receive the same image instance")
         }
 
         // Only one network request
         let totalRequests = await requestTracker.requestCount(for: url)
         #expect(totalRequests == 1)
-
-        // Should have 1 network request + 4 coalesced requests
-        try await waitForStats(instrumentation) { stats in
-            stats.networkRequests == 1 && stats.coalescedRequests == 4
-        }
     }
 
     @Test("Subsequent request after coalesced batch completes triggers new network request")
@@ -350,12 +362,10 @@ struct ImageStreamerCoalescingTests {
         let response = MockImageData.successResponse(for: url)
 
         let requestTracker = RequestTracker()
-        let instrumentation = StandardImageStreamerInstrumentation()
         let (streamer, cache) = makeStreamer(
             result: .success((imageData, response)),
             delay: .milliseconds(100),
-            requestTracker: requestTracker,
-            instrumentation: instrumentation
+            requestTracker: requestTracker
         )
 
         // First batch of coalesced requests
@@ -385,20 +395,25 @@ struct ImageStreamerCancellationTests {
         let imageData = MockImageData.validPNGData()
         let response = MockImageData.successResponse(for: url)
 
-        let (streamer, _) = makeStreamer(
+        let instrumentation = StandardImageStreamerInstrumentation()
+        let (streamer, gate, _) = makeGatedStreamer(
             result: .success((imageData, response)),
-            delay: .seconds(10) // Long delay to ensure we can cancel
+            instrumentation: instrumentation
         )
 
         let task = Task {
             try await streamer.image(for: url)
         }
 
-        // Give the task time to start
-        try await Task.sleep(for: .milliseconds(50))
-
-        // Cancel the task
+        // Wait until the fetch is genuinely in flight (parked on the gate) before cancelling
+        try await waitForStats(instrumentation) { $0.networkRequests == 1 }
         task.cancel()
+
+        // The sole waiter cancelling must tear down the underlying network task
+        try await waitForStats(instrumentation) { $0.cancelledTasks == 1 }
+
+        // Release the gate so the cancelled fetch can unwind
+        await gate.open()
 
         // Should throw CancellationError
         do {
@@ -418,10 +433,11 @@ struct ImageStreamerCancellationTests {
         let response = MockImageData.successResponse(for: url)
 
         let requestTracker = RequestTracker()
-        let (streamer, _) = makeStreamer(
+        let instrumentation = StandardImageStreamerInstrumentation()
+        let (streamer, gate, _) = makeGatedStreamer(
             result: .success((imageData, response)),
-            delay: .seconds(10), // Long delay to ensure we can cancel
-            requestTracker: requestTracker
+            requestTracker: requestTracker,
+            instrumentation: instrumentation
         )
 
         // Start multiple concurrent requests that will be coalesced
@@ -435,13 +451,15 @@ struct ImageStreamerCancellationTests {
             try await streamer.image(for: url)
         }
 
-        // Give tasks time to start and coalesce
-        try await Task.sleep(for: .milliseconds(50))
-
-        // Cancel all tasks
+        // Wait until both secondaries have joined the primary, then cancel all of them
+        try await waitForStats(instrumentation) { $0.networkRequests == 1 && $0.coalescedRequests == 2 }
         task1.cancel()
         task2.cancel()
         task3.cancel()
+
+        // Once every waiter is gone, the underlying network task must be cancelled
+        try await waitForStats(instrumentation) { $0.cancelledTasks == 1 }
+        await gate.open()
 
         // All should throw CancellationError
         for (index, task) in [task1, task2, task3].enumerated() {
@@ -466,9 +484,10 @@ struct ImageStreamerCancellationTests {
         let imageData = MockImageData.validPNGData()
         let response = MockImageData.successResponse(for: url)
 
-        let (streamer, cache) = makeStreamer(
+        let instrumentation = StandardImageStreamerInstrumentation()
+        let (streamer, gate, cache) = makeGatedStreamer(
             result: .success((imageData, response)),
-            delay: .seconds(10)
+            instrumentation: instrumentation
         )
 
         let cacheKey = ImageCacheKey(url: url, pointSize: nil)
@@ -477,8 +496,12 @@ struct ImageStreamerCancellationTests {
             try await streamer.image(for: url)
         }
 
-        try await Task.sleep(for: .milliseconds(50))
+        // Hold the fetch on the gate, then cancel and wait for the underlying task to be cancelled
+        // *before* opening the gate, so the fetch sees the cancellation and never reaches the cache write.
+        try await waitForStats(instrumentation) { $0.networkRequests == 1 }
         task.cancel()
+        try await waitForStats(instrumentation) { $0.cancelledTasks == 1 }
+        await gate.open()
 
         // Wait for cancellation to complete
         _ = try? await task.value
@@ -493,24 +516,27 @@ struct ImageStreamerCancellationTests {
         let imageData = MockImageData.validPNGData()
         let response = MockImageData.successResponse(for: url)
 
-        let (streamer, _) = makeStreamer(
+        let instrumentation = StandardImageStreamerInstrumentation()
+        let (streamer, gate, _) = makeGatedStreamer(
             result: .success((imageData, response)),
-            delay: .milliseconds(200)
+            instrumentation: instrumentation
         )
 
-        // Start two concurrent requests
+        // task1 becomes the primary and parks on the gate
         let task1 = Task {
             try await streamer.image(for: url)
         }
+        try await waitForStats(instrumentation) { $0.networkRequests == 1 }
+
+        // task2 joins as a secondary waiter
         let task2 = Task {
             try await streamer.image(for: url)
         }
+        try await waitForStats(instrumentation) { $0.coalescedRequests == 1 }
 
-        // Give tasks time to coalesce
-        try await Task.sleep(for: .milliseconds(50))
-
-        // Cancel only the first task
+        // Cancel only the first task; task2 keeps the shared fetch alive
         task1.cancel()
+        await gate.open()
 
         // The second task should still complete successfully
         _ = try await task2.value
@@ -524,25 +550,26 @@ struct ImageStreamerCancellationTests {
         let response = MockImageData.successResponse(for: url)
 
         let instrumentation = StandardImageStreamerInstrumentation()
-        let (streamer, _) = makeStreamer(
+        let (streamer, gate, _) = makeGatedStreamer(
             result: .success((imageData, response)),
-            delay: .milliseconds(300),
             instrumentation: instrumentation
         )
 
-        // Start two concurrent requests
+        // task1 becomes the primary and parks on the gate
         let task1 = Task {
             try await streamer.image(for: url)
         }
+        try await waitForStats(instrumentation) { $0.networkRequests == 1 }
+
+        // task2 joins as a secondary waiter
         let task2 = Task {
             try await streamer.image(for: url)
         }
+        try await waitForStats(instrumentation) { $0.coalescedRequests == 1 }
 
-        // Give tasks time to coalesce
-        try await Task.sleep(for: .milliseconds(50))
-
-        // Cancel only the first task
+        // Cancel only the first task; task2 keeps the request alive
         task1.cancel()
+        await gate.open()
 
         // Wait for cancellation to propagate (ignoring error)
         _ = try? await task1.value
@@ -563,27 +590,23 @@ struct ImageStreamerCancellationTests {
         let response = MockImageData.successResponse(for: url)
 
         let instrumentation = StandardImageStreamerInstrumentation()
-        let (streamer, _) = makeStreamer(
+        let (streamer, gate, _) = makeGatedStreamer(
             result: .success((imageData, response)),
-            delay: .milliseconds(300),
             instrumentation: instrumentation
         )
 
-        // Start primary task
+        // Start primary task and wait until it owns the in-flight fetch
         let primaryTask = Task { try await streamer.image(for: url) }
-        
-        // Small delay to ensure primaryTask becomes the primary
-        try await Task.sleep(for: .milliseconds(20))
-        
-        // Start secondary waiters
+        try await waitForStats(instrumentation) { $0.networkRequests == 1 }
+
+        // Start secondary waiters and wait until both have joined the primary
         let secondaryTask1 = Task { try await streamer.image(for: url) }
         let secondaryTask2 = Task { try await streamer.image(for: url) }
+        try await waitForStats(instrumentation) { $0.coalescedRequests == 2 }
 
-        // Give all tasks time to coalesce
-        try await Task.sleep(for: .milliseconds(50))
-
-        // Cancel the primary task
+        // Cancel the primary task; the two secondaries keep the fetch alive
         primaryTask.cancel()
+        await gate.open()
 
         // Secondary tasks should still complete successfully
         _ = try await secondaryTask1.value
@@ -601,9 +624,8 @@ struct ImageStreamerCancellationTests {
         let response = MockImageData.successResponse(for: url)
 
         let instrumentation = StandardImageStreamerInstrumentation()
-        let (streamer, _) = makeStreamer(
+        let (streamer, gate, _) = makeGatedStreamer(
             result: .success((imageData, response)),
-            delay: .seconds(10), // Long delay to ensure we can cancel all
             instrumentation: instrumentation
         )
 
@@ -612,22 +634,23 @@ struct ImageStreamerCancellationTests {
             Task { try await streamer.image(for: url) }
         }
 
-        // Give all tasks time to coalesce
-        try await Task.sleep(for: .milliseconds(100))
+        // Wait until 1 primary + 4 coalesced waiters are all established
+        try await waitForStats(instrumentation) { $0.networkRequests == 1 && $0.coalescedRequests == 4 }
 
         // Cancel all tasks
         for task in tasks {
             task.cancel()
         }
 
-        // Wait for all cancellations to propagate
-        for task in tasks {
-            _ = try? await task.value
-        }
-
         // Should have exactly 1 cancelled task tracked (the underlying network request)
         try await waitForStats(instrumentation) { stats in
             stats.cancelledTasks == 1
+        }
+
+        // Release the gate so the cancelled fetch can unwind
+        await gate.open()
+        for task in tasks {
+            _ = try? await task.value
         }
     }
 
@@ -637,28 +660,72 @@ struct ImageStreamerCancellationTests {
         let imageData = MockImageData.validPNGData()
         let response = MockImageData.successResponse(for: url)
 
-        let (streamer, _) = makeStreamer(
+        let instrumentation = StandardImageStreamerInstrumentation()
+        let (streamer, gate, _) = makeGatedStreamer(
             result: .success((imageData, response)),
-            delay: .milliseconds(300)
+            instrumentation: instrumentation
         )
 
-        // Start initial tasks
+        // task1 becomes the primary; task2 joins it
         let task1 = Task { try await streamer.image(for: url) }
+        try await waitForStats(instrumentation) { $0.networkRequests == 1 }
         let task2 = Task { try await streamer.image(for: url) }
+        try await waitForStats(instrumentation) { $0.coalescedRequests == 1 }
 
-        // Give tasks time to coalesce
-        try await Task.sleep(for: .milliseconds(50))
-
-        // Cancel one task
+        // Cancel task1; task2 keeps the shared fetch alive
         task1.cancel()
-        _ = try? await task1.value
 
-        // Start a late joiner while task2 is still waiting
+        // A late joiner arrives while task2 is still waiting and coalesces onto the same fetch
         let lateJoiner = Task { try await streamer.image(for: url) }
+        try await waitForStats(instrumentation) { $0.coalescedRequests == 2 }
 
-        // Both remaining tasks should complete successfully
+        // Release the fetch; both remaining waiters should complete successfully
+        await gate.open()
         _ = try await task2.value
         _ = try await lateJoiner.value
+    }
+
+    @Test("A cancelled primary's cleanup does not tear down a replacement entry for the same key")
+    func cancelledPrimaryDoesNotRemoveReplacementEntry() async throws {
+        let url = URL(string: "https://example.com/replace.png")!
+        let imageData = MockImageData.validPNGData()
+        let response = MockImageData.successResponse(for: url)
+
+        let requestTracker = RequestTracker()
+        let instrumentation = StandardImageStreamerInstrumentation()
+        let (streamer, gate, _) = makeGatedStreamer(
+            result: .success((imageData, response)),
+            requestTracker: requestTracker,
+            instrumentation: instrumentation
+        )
+
+        // Request A becomes the primary and parks on the gate
+        let requestA = Task { try await streamer.image(for: url) }
+        try await waitForStats(instrumentation) { $0.networkRequests == 1 }
+
+        // Cancelling the sole waiter tears down A's entry and cancels its underlying task,
+        // but the orphaned fetch is still parked on the (shared) gate.
+        requestA.cancel()
+        try await waitForStats(instrumentation) { $0.cancelledTasks == 1 }
+
+        // Request B installs a brand-new primary entry under the same key
+        let requestB = Task { try await streamer.image(for: url) }
+        try await waitForStats(instrumentation) { $0.networkRequests == 2 }
+
+        // A late joiner must coalesce onto B's entry - proving B's entry is intact and was
+        // not removed by A's (cancelled) cleanup running later under the same key.
+        let requestC = Task { try await streamer.image(for: url) }
+        try await waitForStats(instrumentation) { $0.coalescedRequests == 1 }
+
+        // Release everything: A unwinds as cancelled, B and C share the second fetch
+        await gate.open()
+        _ = try? await requestA.value
+        _ = try await requestB.value
+        _ = try await requestC.value
+
+        // Exactly two underlying fetches: A (cancelled) and B (shared by C, not a third fetch)
+        let total = await requestTracker.requestCount(for: url)
+        #expect(total == 2, "Late joiner should coalesce onto the replacement entry, not start a third fetch")
     }
 }
 
@@ -676,7 +743,8 @@ struct ImageStreamerConvenienceTests {
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        _ = try await streamer.image(for: urlString)
+        let image = try await streamer.image(for: urlString)
+        #expect(extractCGImage(from: image) != nil)
     }
 
     @Test("Throws invalidURL for bad URL strings", arguments: [
@@ -701,7 +769,8 @@ struct ImageStreamerConvenienceTests {
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        _ = try await streamer.image(for: urlString)
+        let image = try await streamer.image(for: urlString)
+        #expect(extractCGImage(from: image) != nil)
     }
 }
 
@@ -718,8 +787,9 @@ struct ImageStreamerHTTPStatusTests {
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        // Should not throw for 2xx status codes
-        _ = try await streamer.image(for: url)
+        // Should not throw for 2xx status codes, and should return a usable image
+        let image = try await streamer.image(for: url)
+        #expect(extractCGImage(from: image) != nil)
     }
 
     @Test("Rejects 4xx client error status codes", arguments: [400, 401, 403, 404, 405, 408, 429])
@@ -730,9 +800,10 @@ struct ImageStreamerHTTPStatusTests {
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        await #expect(throws: URLError.self) {
+        let error = await #expect(throws: URLError.self) {
             _ = try await streamer.image(for: url)
         }
+        #expect(error?.code == .badServerResponse)
     }
 
     @Test("Rejects 5xx server error status codes", arguments: [500, 501, 502, 503, 504])
@@ -743,9 +814,10 @@ struct ImageStreamerHTTPStatusTests {
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        await #expect(throws: URLError.self) {
+        let error = await #expect(throws: URLError.self) {
             _ = try await streamer.image(for: url)
         }
+        #expect(error?.code == .badServerResponse)
     }
 
     @Test("Rejects 3xx redirect status codes", arguments: [301, 302, 303, 307, 308])
@@ -756,9 +828,10 @@ struct ImageStreamerHTTPStatusTests {
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        await #expect(throws: URLError.self) {
+        let error = await #expect(throws: URLError.self) {
             _ = try await streamer.image(for: url)
         }
+        #expect(error?.code == .badServerResponse)
     }
 
     @Test("Rejects 1xx informational status codes", arguments: [100, 101, 102])
@@ -769,9 +842,10 @@ struct ImageStreamerHTTPStatusTests {
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        await #expect(throws: URLError.self) {
+        let error = await #expect(throws: URLError.self) {
             _ = try await streamer.image(for: url)
         }
+        #expect(error?.code == .badServerResponse)
     }
 }
 
@@ -822,7 +896,7 @@ struct ImageStreamerStatsTests {
         let response = MockImageData.successResponse(for: url)
 
         let instrumentation = StandardImageStreamerInstrumentation()
-        let (streamer, gate) = makeGatedStreamer(
+        let (streamer, gate, _) = makeGatedStreamer(
             result: .success((imageData, response)),
             instrumentation: instrumentation
         )
@@ -914,12 +988,19 @@ struct ImageStreamerEdgeCaseTests {
     )
     func handlesVariousPointSizes(pointSize: CGSize) async throws {
         let url = URL(string: "https://example.com/image.png")!
-        let imageData = MockImageData.validPNGData()
+        let sourceDimension = 512
+        let imageData = MockImageData.largePNGData(dimension: sourceDimension)
         let response = MockImageData.successResponse(for: url)
 
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
-        _ = try await streamer.image(for: url, pointSize: pointSize)
+        let image = try await streamer.image(for: url, pointSize: pointSize)
+
+        // Regardless of the requested size, downsampling must never upscale beyond the
+        // source - even when the requested size (e.g. 10000x10000) exceeds it.
+        let cgImage = try #require(extractCGImage(from: image))
+        #expect(cgImage.width <= sourceDimension && cgImage.height <= sourceDimension)
+        #expect(cgImage.width > 0 && cgImage.height > 0)
     }
 
     @Test("Same URL with different query parameters are cached separately")
@@ -967,7 +1048,8 @@ struct ImageStreamerEdgeCaseTests {
         let (streamer, _) = makeStreamer(result: .success((imageData, response)))
 
         // Should still work since non-HTTP responses pass the status check
-        _ = try await streamer.image(for: url)
+        let image = try await streamer.image(for: url)
+        #expect(extractCGImage(from: image) != nil)
     }
 }
 
@@ -1035,6 +1117,75 @@ struct ImageCacheKeyTests {
     }
 }
 
+// MARK: - ImageCache Tests
+
+@Suite("ImageCache")
+struct ImageCacheTests {
+
+    private func makeImage() throws -> PlatformImage {
+        try #require(PlatformImage(data: MockImageData.validPNGData()))
+    }
+
+    @Test("Stores and retrieves an image by key")
+    func storesAndRetrievesImage() throws {
+        let cache = ImageCache()
+        let key = ImageCacheKey(url: URL(string: "https://example.com/a.png")!, pointSize: nil)
+        let image = try makeImage()
+
+        cache.setObject(image, forKey: key, cost: 1)
+
+        #expect(cache.object(forKey: key) === image)
+    }
+
+    @Test("Returns nil for an unknown key")
+    func returnsNilForUnknownKey() {
+        let cache = ImageCache()
+        let key = ImageCacheKey(url: URL(string: "https://example.com/missing.png")!, pointSize: nil)
+
+        #expect(cache.object(forKey: key) == nil)
+    }
+
+    @Test("Removes a single entry")
+    func removesSingleEntry() throws {
+        let cache = ImageCache()
+        let key = ImageCacheKey(url: URL(string: "https://example.com/a.png")!, pointSize: nil)
+        cache.setObject(try makeImage(), forKey: key, cost: 1)
+
+        cache.removeObject(forKey: key)
+
+        #expect(cache.object(forKey: key) == nil)
+    }
+
+    @Test("Removes all entries")
+    func removesAllEntries() throws {
+        let cache = ImageCache()
+        let key1 = ImageCacheKey(url: URL(string: "https://example.com/a.png")!, pointSize: nil)
+        let key2 = ImageCacheKey(url: URL(string: "https://example.com/b.png")!, pointSize: nil)
+        let image = try makeImage()
+        cache.setObject(image, forKey: key1, cost: 1)
+        cache.setObject(image, forKey: key2, cost: 1)
+
+        cache.removeAllObjects()
+
+        #expect(cache.object(forKey: key1) == nil)
+        #expect(cache.object(forKey: key2) == nil)
+    }
+
+    // The wrapper forwards these limits to NSCache. We only assert the values round-trip:
+    // NSCache treats both as advisory ("not a strict limit"), so it may evict immediately,
+    // later, or never - asserting actual eviction here would be inherently flaky.
+    @Test("Cost and count limits round-trip through the wrapper")
+    func limitsRoundTrip() {
+        let cache = ImageCache()
+
+        cache.totalCostLimit = 5_000_000
+        cache.countLimit = 42
+
+        #expect(cache.totalCostLimit == 5_000_000)
+        #expect(cache.countLimit == 42)
+    }
+}
+
 // MARK: - Test Helpers
 
 /// Creates a configured ImageStreamer with its dependencies for testing.
@@ -1085,8 +1236,9 @@ func makeGatedStreamer(
     result: Result<(Data, URLResponse), Error>,
     requestTracker: RequestTracker? = nil,
     instrumentation: ImageStreamerInstrumentation? = nil
-) -> (streamer: ImageStreamer, gate: RequestGate) {
+) -> (streamer: ImageStreamer, gate: RequestGate, cache: ImageCache) {
     let gate = RequestGate()
+    let cache = ImageCache()
     let mockFetcher = GatedMockFetcher(
         result: result,
         gate: gate,
@@ -1094,10 +1246,10 @@ func makeGatedStreamer(
     )
     let streamer = ImageStreamer(
         session: mockFetcher,
-        cache: ImageCache(),
+        cache: cache,
         instrumentation: instrumentation
     )
-    return (streamer, gate)
+    return (streamer, gate, cache)
 }
 
 /// Helper to wait for async stats updates with timeout.

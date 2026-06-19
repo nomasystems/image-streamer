@@ -2,22 +2,7 @@ import Testing
 import Foundation
 @testable import ImageStreamer
 
-#if canImport(UIKit)
-import UIKit
-#elseif canImport(AppKit)
-import AppKit
-#endif
-
-/// Cross-platform helper to extract a CGImage from a PlatformImage.
-private func extractCGImage(from image: PlatformImage) -> CGImage? {
-    #if canImport(UIKit)
-    return image.cgImage
-    #elseif canImport(AppKit)
-    return image.cgImage(forProposedRect: nil, context: nil, hints: nil)
-    #else
-    return nil
-    #endif
-}
+// `extractCGImage(from:)` is a shared cross-platform test helper defined in Mocks/MockImageFetcher.swift.
 
 @Suite("ImageStreamer Format Support")
 struct ImageStreamerFormatTests {
