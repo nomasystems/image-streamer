@@ -27,7 +27,7 @@ In infinite scroll scenarios, views frequently move off-screen before their imag
 
 ## Caching Strategy
 
-`ImageStreamer` uses an internal `NSCache` instance. This offers key advantages:
+`ImageStreamer` uses an `ImageCache`, a lightweight thread-safe wrapper around `NSCache`. This offers key advantages:
 - Thread-safe access.
 - Automatic, system-level pruning when memory is low (preventing OOM crashes).
 - Cost-based eviction (calculated based on the image's pixel count or size in memory).
@@ -66,7 +66,7 @@ The entire `ImageStreamer` sits behind protocols (`ImageStreamerProtocol`, `Imag
 ```swift
 public init(
     session: ImageFetching = URLSession.shared,
-    cache: NSCache<ImageCacheKey, PlatformImage> = NSCache(),
+    cache: ImageCache = ImageCache(),
     instrumentation: ImageStreamerInstrumentation? = nil
 )
 ```

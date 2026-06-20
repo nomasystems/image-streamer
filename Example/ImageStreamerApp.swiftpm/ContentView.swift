@@ -44,7 +44,6 @@ struct ContentView: View {
     ContentView()
         .environment(\.imageStreamer, ImageStreamer(
             session: URLSession.shared,
-            cache: NSCache(),
             instrumentation: StandardImageStreamerInstrumentation()
         ))
 }

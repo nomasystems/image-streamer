@@ -4,18 +4,22 @@ import ImageStreamer
 @main
 struct ShowcaseApp: App {
     // Create instrumentation for stats tracking
-    private let instrumentation = StandardImageStreamerInstrumentation()
-    
-    // Create a shared, long-lived instance for the entire app
-    // This enables effective caching and task coalescing
-    private var imageStreamer: ImageStreamer {
-        ImageStreamer(
+    private let instrumentation: StandardImageStreamerInstrumentation
+
+    // A single, long-lived instance shared by the entire app.
+    // Stored (not computed) so the cache and task coalescing survive body re-evaluations.
+    private let imageStreamer: ImageStreamer
+
+    init() {
+        let instrumentation = StandardImageStreamerInstrumentation()
+        self.instrumentation = instrumentation
+        self.imageStreamer = ImageStreamer(
             session: URLSession.shared,
-            cache: NSCache(),
             instrumentation: instrumentation
         )
     }
-    
+
+
     var body: some Scene {
         WindowGroup {
             ContentView()

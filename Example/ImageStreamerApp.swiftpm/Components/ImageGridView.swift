@@ -14,8 +14,7 @@ struct ImageGridView: View {
     @Environment(\.imageStreamer) private var imageStreamer
     
     @State private var imageIDs: [Int] = Array(1...50)
-    @State private var isLoadingMore = false
-    
+
     private let batchSize = 50
 
     private let columns = [
@@ -35,12 +34,6 @@ struct ImageGridView: View {
                             }
                         }
                 }
-                
-                if isLoadingMore {
-                    ProgressView()
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                }
             }
             .padding(4)
         }
@@ -54,17 +47,8 @@ struct ImageGridView: View {
     }
     
     private func loadMoreImages() {
-        guard !isLoadingMore else { return }
-        
-        isLoadingMore = true
-
-        Task {
-            let nextStart = imageIDs.count + 1
-            let newIDs = Array(nextStart...(nextStart + batchSize - 1))
-            imageIDs.append(contentsOf: newIDs)
-            
-            isLoadingMore = false
-        }
+        let nextStart = imageIDs.count + 1
+        imageIDs.append(contentsOf: nextStart...(nextStart + batchSize - 1))
     }
     
     /// Prefetches images without blocking - warms the cache.

@@ -1,5 +1,27 @@
 import ImageStreamer
 import Foundation
+import CoreGraphics
+import ImageIO
+
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
+
+/// Cross-platform helper to extract a `CGImage` from a `PlatformImage`.
+///
+/// `UIImage.cgImage` is a stored optional, but `NSImage` exposes a `cgImage(forProposedRect:context:hints:)`
+/// method instead - so tests must not touch `image.cgImage` directly if they are to build on every platform.
+func extractCGImage(from image: PlatformImage) -> CGImage? {
+    #if canImport(UIKit)
+    return image.cgImage
+    #elseif canImport(AppKit)
+    return image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+    #else
+    return nil
+    #endif
+}
 
 // MARK: - Mock ImageFetcher for Testing
 
@@ -79,6 +101,42 @@ enum MockImageData {
             0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82
         ]
         return Data(pngData)
+    }
+
+    /// Creates a solid-color PNG of the given square `dimension` (default 512×512).
+    ///
+    /// Unlike `validPNGData()` (a 1×1 pixel), this is large enough to actually be
+    /// downsampled, so tests can assert that the downsample path produces a smaller
+    /// image instead of just checking that *some* image came back.
+    static func largePNGData(dimension: Int = 512) -> Data {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(
+            data: nil,
+            width: dimension,
+            height: dimension,
+            bitsPerComponent: 8,
+            bytesPerRow: dimension * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return Data()
+        }
+
+        context.setFillColor(red: 1, green: 0, blue: 0, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: dimension, height: dimension))
+
+        guard let cgImage = context.makeImage() else { return Data() }
+
+        let encoded = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            encoded, "public.png" as CFString, 1, nil
+        ) else {
+            return Data()
+        }
+        CGImageDestinationAddImage(destination, cgImage, nil)
+        guard CGImageDestinationFinalize(destination) else { return Data() }
+
+        return encoded as Data
     }
 
     /// Creates valid JPEG image data for testing.

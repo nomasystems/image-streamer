@@ -23,8 +23,8 @@ let package = Package(
             teamIdentifier: "JM8BMXQ5NG",
             displayVersion: "1.0",
             bundleVersion: "1",
-            appIcon: .placeholder(icon: .note),
-            accentColor: .presetColor(.cyan),
+            appIcon: .placeholder(icon: .images),
+            accentColor: .presetColor(.indigo),
             supportedDeviceFamilies: [
                 .pad,
                 .phone
@@ -50,5 +50,5 @@ let package = Package(
             path: "."
         )
     ],
-    swiftLanguageModes: [.version("6")]
+    swiftLanguageVersions: [.version("6")]
 )
